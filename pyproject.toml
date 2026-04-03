@@ -1,0 +1,95 @@
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+# ── project metadata ────────────────────────────────────────────────────────
+[project]
+name        = "vripr"
+version     = "0.1.0"
+description = "The vinyl viper for perfect rips — Audacity vinyl ripping helper with AcoustID, MusicBrainz and Discogs"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.10"
+authors     = [{ name = "vripr contributors" }]
+keywords    = ["vinyl", "rip", "audacity", "acoustid", "musicbrainz", "discogs", "music", "flac"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Utilities",
+]
+
+# ── runtime dependencies ─────────────────────────────────────────────────────
+dependencies = [
+    "PyQt6>=6.6.0",
+    "pyacoustid>=1.3.0",
+    "musicbrainzngs>=0.7.1",
+    "discogs-client>=2.4.0",
+    "mutagen>=1.47.0",
+    "requests>=2.31.0",
+]
+
+# ── optional / extras ────────────────────────────────────────────────────────
+[project.optional-dependencies]
+dev  = ["pytest>=8.0", "pytest-qt>=4.4", "ruff>=0.4", "mypy>=1.9", "hatchling"]
+docs = ["mkdocs>=1.5", "mkdocs-material>=9.5"]
+
+# ── entry points ─────────────────────────────────────────────────────────────
+[project.scripts]
+vripr = "vripr.app:main"
+
+[project.gui-scripts]
+vripr-gui = "vripr.app:main"
+
+# ── project URLs ──────────────────────────────────────────────────────────────
+[project.urls]
+Homepage   = "https://github.com/YOUR_GITHUB_USERNAME/vripr"
+Repository = "https://github.com/YOUR_GITHUB_USERNAME/vripr"
+Issues     = "https://github.com/YOUR_GITHUB_USERNAME/vripr/issues"
+Changelog  = "https://github.com/YOUR_GITHUB_USERNAME/vripr/blob/main/CHANGELOG.md"
+
+# ── hatchling build config ───────────────────────────────────────────────────
+[tool.hatch.build.targets.wheel]
+packages = ["src/vripr"]
+
+# ── uv tool config ────────────────────────────────────────────────────────────
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "hatchling",
+]
+
+# ── ruff linter ──────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length    = 100
+target-version = "py310"
+src            = ["src"]
+
+[tool.ruff.lint]
+select  = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore  = ["E501", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vripr"]
+
+# ── mypy ─────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version         = "3.10"
+strict                 = false
+warn_unused_ignores    = true
+ignore_missing_imports = true
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"

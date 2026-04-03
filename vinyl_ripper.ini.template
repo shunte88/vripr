@@ -1,0 +1,48 @@
+[DEFAULT]
+acoustid_api_key =
+discogs_token =
+export_format = flac
+export_dir = ~/Music/Vinyl
+silence_threshold_db = -40
+silence_min_duration = 1.5
+default_artist =
+default_album =
+default_album_artist =
+default_genre =
+default_year =
+mb_user_agent = VinylRipper/1.0 ( vinyl-ripper@example.com )
+
+[vinyl_ripper]
+# ── API Keys ──────────────────────────────────────────────────────────────
+# AcoustID API key — free registration at https://acoustid.org/login
+acoustid_api_key =
+
+# Discogs personal access token — https://www.discogs.com/settings/developers
+discogs_token =
+
+# ── Export ─────────────────────────────────────────────────────────────────
+# Supported formats: flac  mp3  wav  ogg
+export_format = flac
+
+# Folder where exported tracks are saved.
+# Sub-folders are created automatically:  export_dir/Artist/Album/
+export_dir = ~/Music/Vinyl
+
+# ── Silence Detection ──────────────────────────────────────────────────────
+# Audacity SilenceFind threshold in dBFS (negative number; louder = less negative)
+silence_threshold_db = -40
+
+# Minimum silence duration in seconds before a gap is recognised
+silence_min_duration = 1.5
+
+# ── Per-session Defaults ───────────────────────────────────────────────────
+# Pre-populate the export dialog with these values.
+# Leave blank to prompt each time.
+default_artist =
+default_album =
+default_album_artist =
+default_genre =
+default_year =
+
+# MusicBrainz user-agent string (app/version contact-email)
+mb_user_agent = VinylRipper/1.0 ( vinyl-ripper@example.com )
