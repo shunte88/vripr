@@ -1,15 +1,17 @@
-# 🐍 vripr — The vinyl viper for perfect rips
+# vripr — The vinyl viper for perfect rips
 
 > A PyQt6 desktop assistant that connects to Audacity, fingerprints your vinyl
 > recordings with **Chromaprint / AcoustID**, pulls metadata from **MusicBrainz**
 > and **Discogs**, and exports beautifully tagged FLAC / MP3 files — automatically.
 
-[![CI](https://github.com/YOUR_GITHUB_USERNAME/vripr/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USERNAME/vripr/actions/workflows/ci.yml)
+[![CI](https://github.com/shunte88/vripr/actions/workflows/ci.yml/badge.svg)](https://github.com/shunte88/vripr/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/vripr)](https://pypi.org/project/vripr/)
 [![Python](https://img.shields.io/pypi/pyversions/vripr)](https://pypi.org/project/vripr/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
+
+<img width="800" src="assets/vripr.webp" align="center" />
 
 ## ✨ Features
 
@@ -69,7 +71,7 @@ Record vinyl side in Audacity
 ## 🛠 Development setup
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/vripr.git
+git clone https://github.com/shunte88/vripr.git
 cd vripr
 
 # Install uv (if not already)

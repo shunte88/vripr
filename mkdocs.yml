@@ -1,8 +1,8 @@
 site_name: vripr — The vinyl viper for perfect rips
 site_description: Audacity vinyl ripping helper with AcoustID, MusicBrainz and Discogs
-site_url: https://YOUR_GITHUB_USERNAME.github.io/vripr
-repo_url: https://github.com/YOUR_GITHUB_USERNAME/vripr
-repo_name: YOUR_GITHUB_USERNAME/vripr
+site_url: https://shunte88.github.io/vripr
+repo_url: https://github.com/shunte88/vripr
+repo_name: shunte88/vripr
 edit_uri: edit/main/docs/
 
 theme:

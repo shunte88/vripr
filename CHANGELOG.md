@@ -34,5 +34,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions CI — lint, type-check, test (3 OS × 3 Python versions), build
 - GitHub Actions release workflow — tag-triggered PyPI publish via trusted publishing
 
-[Unreleased]: https://github.com/YOUR_GITHUB_USERNAME/vripr/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/YOUR_GITHUB_USERNAME/vripr/releases/tag/v0.1.0
+[Unreleased]: https://github.com/shunte88/vripr/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/shunte88/vripr/releases/tag/v0.1.0

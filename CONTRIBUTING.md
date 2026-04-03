@@ -19,7 +19,7 @@ you need to get up and running.
 ### Clone and install
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/vripr.git
+git clone https://github.com/shunte88/vripr.git
 cd vripr
 
 # create virtual env + install all deps (runtime + dev)

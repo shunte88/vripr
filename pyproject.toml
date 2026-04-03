@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 [project]
 name        = "vripr"
 version     = "0.1.0"
-description = "The vinyl viper for perfect rips — Audacity vinyl ripping helper with AcoustID, MusicBrainz and Discogs"
+description = "The vinyl viper for perfect rippage — Audacity vinyl ripping helper with AcoustID, MusicBrainz and Discogs"
 readme      = "README.md"
 license     = { text = "MIT" }
 requires-python = ">=3.10"
@@ -50,10 +50,10 @@ vripr-gui = "vripr.app:main"
 
 # ── project URLs ──────────────────────────────────────────────────────────────
 [project.urls]
-Homepage   = "https://github.com/YOUR_GITHUB_USERNAME/vripr"
-Repository = "https://github.com/YOUR_GITHUB_USERNAME/vripr"
-Issues     = "https://github.com/YOUR_GITHUB_USERNAME/vripr/issues"
-Changelog  = "https://github.com/YOUR_GITHUB_USERNAME/vripr/blob/main/CHANGELOG.md"
+Homepage   = "https://github.com/shunte88/vripr"
+Repository = "https://github.com/shunte88/vripr"
+Issues     = "https://github.com/shunte88/vripr/issues"
+Changelog  = "https://github.com/shunte88/vripr/blob/main/CHANGELOG.md"
 
 # ── hatchling build config ───────────────────────────────────────────────────
 [tool.hatch.build.targets.wheel]
