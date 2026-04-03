@@ -513,7 +513,33 @@ class AudacityPipe:
         self._to    = to_val
         self._from_ = from_val
         self.connected = True
+        # Drain any stale data left in the pipe from previous sessions
+        self.drain_stale()
         return True, "OK"
+
+    def drain_stale(self) -> None:
+        """Drain any stale data sitting in the read pipe buffer.
+
+        Previous sessions or failed Raise: commands may have left unread
+        sentinel lines / error messages in the kernel pipe buffer.  We use
+        select() with zero timeout to read and discard whatever is there
+        before sending the first real command.
+        """
+        if not self._from_ or sys.platform == "win32":
+            return
+        try:
+            import select as _sel
+            fd = self._from_.fileno()
+            while True:
+                ready, _, _ = _sel.select([fd], [], [], 0)
+                if not ready:
+                    break
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                # discard — these are stale responses we don't want
+        except Exception:
+            pass
 
     def disconnect(self) -> None:
         """Close our file handles.  Does NOT delete the pipe files — those
@@ -554,15 +580,11 @@ class AudacityPipe:
         if not self.connected:
             return ""
 
-        # Raise Audacity window before sending any command that needs it.
-        # This is a no-op if focus is already held; cost is ~200-500 ms.
+        # Raise Audacity window via OS-level tools only.
+        # We do NOT send "Raise:" through the pipe — it is not a valid command
+        # in all Audacity versions and its failure response corrupts the pipe
+        # read buffer, causing the NEXT command's response to be misread.
         if needs_focus:
-            try:
-                self._to.write("Raise:" + _EOL)
-                self._to.flush()
-                time.sleep(0.1)
-            except Exception:
-                pass
             _raise_audacity_window()
             time.sleep(0.3)   # let WM complete focus switch
 
@@ -644,18 +666,6 @@ class AudacityPipe:
         except Exception as exc:
             return False, str(exc)
 
-    def get_version(self) -> str:
-        """Return the Audacity version string, or empty string on failure."""
-        try:
-            raw = self.send("GetInfo: Type=Commands Format=JSON", timeout=8.0)
-            # Audacity 3.x: try dedicated version command first
-            raw2 = self.send("Version:", timeout=5.0)
-            if raw2.strip():
-                return raw2.strip()
-        except Exception:
-            pass
-        return ""
-
     def raise_focus(self) -> None:
         """Raise the Audacity window before sending any focus-dependent command.
 
@@ -665,60 +675,15 @@ class AudacityPipe:
         Commands that do NOT need focus (read-only queries):
             GetInfo:  Version:  Raise:
 
-        Strategy:
-          1. Send the native ``Raise:`` pipe command (fire-and-forget, raw write
-             so we don't block waiting for a sentinel that may not arrive).
-          2. Let the OS-level helper do wmctrl/xdotool/osascript/ctypes.
-          3. Sleep 0.5 s to let the window manager complete the focus switch.
+        Uses OS-level tools only (wmctrl/xdotool on Linux, osascript on macOS,
+        ctypes SetForegroundWindow on Windows).  Does NOT send any pipe command
+        — "Raise:" is rejected by this Audacity version and corrupts the pipe.
         """
-        # Step 1 — native Raise: via raw write (no blocking send())
-        try:
-            self._to.write("Raise:" + _EOL)
-            self._to.flush()
-            time.sleep(0.2)
-        except Exception:
-            pass
-        # Step 2 — OS-level raise
+        # OS-level raise only — no pipe commands.
+        # "Raise:" is not valid in all Audacity versions; sending it writes a
+        # failure response into the pipe buffer that corrupts subsequent reads.
         _raise_audacity_window()
-        # Step 3 — let WM settle
-        time.sleep(0.5)
-
-    def label_sounds(self, threshold_db: float, min_silence_s: float,
-                     min_label_interval_s: float = 0.0) -> None:
-        """Run the 'Label Sounds' Nyquist plugin via its scripting ID.
-
-        This is the correct silence/track-detection command in Audacity 3.x
-        on Linux — SilenceFind is not exposed as a scripting command.
-
-        Label Sounds parameters (all optional, these are the defaults):
-          threshold_db          : -40   level below which audio is 'silent'
-          min_silence_duration  : 1.0   minimum gap to count as silence (s)
-          min_label_interval    : 0.0   minimum time between labels (s)
-          label_type            : 0     0=before sound, 1=around sound,
-                                        2=around silence
-          pre_label_time        : 0.0   time before sound to place label
-          post_label_time       : 0.0   time after sound to place label
-          text_type             : 0     0=none, 1=number, 2=text
-          text                  : ""    label text (if text_type=2)
-        """
-        # Nyquist plugin scripting ID from GetInfo:Type=Menus output
-        plugin_id = (
-            "Effect_Nyquist_Steve Daulton_Label Sounds_"
-            "/usr/share/audacity/plug-ins/label-sounds.ny"
-        )
-        # Parameters use Nyquist plugin parameter names
-        cmd = (
-            f"{plugin_id}: "
-            f"threshold={threshold_db:.1f} "
-            f"min-silence={min_silence_s:.2f} "
-            f"min-interval={min_label_interval_s:.2f} "
-            f"label-type=0 "    # 0 = place label before each sound region
-            f"pre-label=0.0 "
-            f"post-label=0.0 "
-            f"text-type=1 "     # 1 = number labels sequentially
-            f"text=''"
-        )
-        self.send(cmd, timeout=180.0)
+        time.sleep(0.5)   # let WM complete the focus switch
 
     def get_labels(self) -> list:
         raw = self.send("GetInfo: Type=Labels Format=JSON")
@@ -784,8 +749,8 @@ class TrackMeta:
 # Qt table model
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-_COLS = ["", "#", "Time", "Title", "Artist", "Album", "Genre", "Year"]
-_COL_W = [24, 40, 100, 200, 160, 160, 100, 60]
+_COLS  = ["", "#", "Time", "Title", "Artist", "Album", "Album Artist", "Genre", "Year"]
+_COL_W = [24,  40,  110,   200,     150,      150,     130,              90,      55]
 
 _STATUS_COL      = 0
 _NUM_COL         = 1
@@ -793,8 +758,9 @@ _TIME_COL        = 2
 _TITLE_COL       = 3
 _ARTIST_COL      = 4
 _ALBUM_COL       = 5
-_GENRE_COL       = 6
-_YEAR_COL        = 7
+_ALBUM_ARTIST_COL = 6
+_GENRE_COL       = 7
+_YEAR_COL        = 8
 
 
 class TrackTableModel(QAbstractTableModel):
@@ -822,14 +788,15 @@ class TrackTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.DisplayRole:
             return {
-                _STATUS_COL: t.status_icon,
-                _NUM_COL:    t.track_number,
-                _TIME_COL:   t.display_time,
-                _TITLE_COL:  t.title,
-                _ARTIST_COL: t.artist,
-                _ALBUM_COL:  t.album,
-                _GENRE_COL:  t.genre,
-                _YEAR_COL:   t.year,
+                _STATUS_COL:       t.status_icon,
+                _NUM_COL:          t.track_number,
+                _TIME_COL:         t.display_time,
+                _TITLE_COL:        t.title,
+                _ARTIST_COL:       t.artist,
+                _ALBUM_COL:        t.album,
+                _ALBUM_ARTIST_COL: t.album_artist,
+                _GENRE_COL:        t.genre,
+                _YEAR_COL:         t.year,
             }.get(col, "")
 
         if role == Qt.ItemDataRole.ForegroundRole:
@@ -844,12 +811,25 @@ class TrackTableModel(QAbstractTableModel):
                 return Qt.AlignmentFlag.AlignCenter
             return Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
 
+        if role == Qt.ItemDataRole.ToolTipRole:
+            # Show full value in tooltip — useful for truncated cells
+            return {
+                _TITLE_COL:        t.title,
+                _ARTIST_COL:       t.artist,
+                _ALBUM_COL:        t.album,
+                _ALBUM_ARTIST_COL: t.album_artist,
+                _GENRE_COL:        t.genre,
+            }.get(col, "")
+
         return None
 
     # ── write ─────────────────────────────────────────────────────────────
     def flags(self, index: QModelIndex):
         base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if index.column() in (_TITLE_COL, _ARTIST_COL, _ALBUM_COL, _GENRE_COL, _YEAR_COL, _NUM_COL):
+        if index.column() in (
+            _NUM_COL, _TITLE_COL, _ARTIST_COL, _ALBUM_COL,
+            _ALBUM_ARTIST_COL, _GENRE_COL, _YEAR_COL
+        ):
             return base | Qt.ItemFlag.ItemIsEditable
         return base
 
@@ -859,12 +839,13 @@ class TrackTableModel(QAbstractTableModel):
         t = self._tracks[index.row()]
         col = index.column()
         mapping = {
-            _NUM_COL:    "track_number",
-            _TITLE_COL:  "title",
-            _ARTIST_COL: "artist",
-            _ALBUM_COL:  "album",
-            _GENRE_COL:  "genre",
-            _YEAR_COL:   "year",
+            _NUM_COL:          "track_number",
+            _TITLE_COL:        "title",
+            _ARTIST_COL:       "artist",
+            _ALBUM_COL:        "album",
+            _ALBUM_ARTIST_COL: "album_artist",
+            _GENRE_COL:        "genre",
+            _YEAR_COL:         "year",
         }
         if col in mapping:
             setattr(t, mapping[col], value)
@@ -1109,23 +1090,14 @@ class ConnectVerifyWorker(QThread):
             self.log.emit(f"  JSON parse failed ({e}) — raw: {raw[:100]!r}")
             n_tracks = -1
 
-        # ── Step 3: Version: command (Audacity 3.2+, optional) ────────────
-        version_str = ""
-        self.log.emit("  Sending: Version:")
-        try:
-            version_str = self._pipe.send("Version:", timeout=5.0).strip()
-            self.log.emit(f"  Version response: {version_str!r}")
-        except TimeoutError:
-            self.log.emit("  Version: timed out (pre-3.2 Audacity — that's OK)")
-        except Exception as exc:
-            self.log.emit(f"  Version: error: {exc}")
-
+        # ── Step 3: done — GetInfo:Tracks is sufficient ─────────────────
+        # Version: is not a valid command in all Audacity builds and causes
+        # a 5s timeout hang every connect.  We skip it — the track info
+        # from Step 1 is all we need to confirm the pipe is working.
         track_info = (f"{n_tracks} track(s) in project"
                       if n_tracks >= 0 else "project info unavailable")
-        info = (f"Audacity {version_str}  —  {track_info}"
-                if version_str else track_info)
-        self.log.emit(f"  ✓ Round-trip OK  [{info}]")
-        self.ok.emit(info)
+        self.log.emit(f"  ✓ Round-trip OK  [{track_info}]")
+        self.ok.emit(track_info)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Silence-detection + label-import worker
@@ -1287,57 +1259,34 @@ class SilenceWorker(QThread):
                 f"Running silence detection (threshold={thresh} dB, min={min_dur}s)…"
             )
 
-            # ── Strategy A: Label Sounds via Audacity pipe ────────────────────
-            # Label Sounds is the correct Nyquist plugin for this Audacity build.
-            # It places numbered point labels at the start of each sound region.
-            label_sounds_ok = False
-            self.log.emit("  Trying Label Sounds plugin via pipe…")
-            try:
-                self._pipe.label_sounds(thresh, min_dur)
-                # Verify labels were actually created
-                raw    = self._pipe.send("GetInfo: Type=Labels Format=JSON", timeout=15.0)
-                ldata  = json.loads(raw)
-                n_lbls = sum(len(e[1]) for e in ldata if len(e) >= 2)
-                if n_lbls > 0:
-                    self.log.emit(f"  Label Sounds created {n_lbls} label(s) ✓")
-                    label_sounds_ok = True
-                else:
-                    self.log.emit("  Label Sounds ran but created no labels — "
-                                  "trying Python scanner…")
-            except TimeoutError:
-                self.log.emit("  Label Sounds timed out — trying Python scanner…")
-            except Exception as exc:
-                self.log.emit(f"  Label Sounds error: {exc} — trying Python scanner…")
-
-            if label_sounds_ok:
-                # Labels are already in Audacity — fall through to Import Labels path
-                self.log.emit("Silence detection complete — importing labels…")
-            else:
-                # ── Strategy B: Python-native scanner ────────────────────────
-                if not audio_file:
-                    self.error.emit(
-                        "Label Sounds did not run and the audio file path could\n"
-                        "not be determined automatically.\n\n"
-                        "Please specify the WAV file path in Settings → Audio File,\n"
-                        "or place labels manually in Audacity and use Import Labels."
-                    )
-                    return
-
-                self.log.emit(f"  Scanning: {Path(audio_file).name}")
-                try:
-                    silence_regions = self._detect_silences_python(
-                        audio_file, thresh, min_dur
-                    )
-                except Exception as exc:
-                    self.error.emit(f"Python silence detection failed: {exc}")
-                    return
-
-                self.log.emit(
-                    f"  Found {len(silence_regions)} silence region(s) — "
-                    f"deriving track boundaries…"
+            # Python-native silence scanner — the only reliable approach.
+            # Nyquist plugins (Label Sounds) always show a parameter dialog
+            # when invoked via the pipe, so cannot run unattended.
+            # The Python scanner reads the WAV file directly — no Audacity
+            # focus or interaction required.
+            if not audio_file:
+                self.error.emit(
+                    "The audio file path could not be determined automatically.\n\n"
+                    "Set it in ⚙ Settings → Defaults → Audio File, or use\n"
+                    "Import Labels after placing labels manually in Audacity."
                 )
-                self._derive_tracks_from_silences(silence_regions, sec, project_end)
                 return
+
+            self.log.emit(f"  Scanning: {Path(audio_file).name}")
+            try:
+                silence_regions = self._detect_silences_python(
+                    audio_file, thresh, min_dur
+                )
+            except Exception as exc:
+                self.error.emit(f"Python silence detection failed: {exc}")
+                return
+
+            self.log.emit(
+                f"  Found {len(silence_regions)} silence region(s) — "
+                f"deriving track boundaries…"
+            )
+            self._derive_tracks_from_silences(silence_regions, sec, project_end)
+            return
 
         # ── Import Labels path (run_detect=False) ────────────────────────────
         # User has placed labels manually in Audacity; just read them back.
@@ -1602,116 +1551,6 @@ class ExportWorker(QThread):
 
         self.progress.emit(len(self._rows), len(self._rows))
         self.finished_all.emit()
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Detail panel
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class DetailPanel(QWidget):
-    meta_changed    = pyqtSignal(dict)    # emitted on Save
-    mb_requested    = pyqtSignal(str, str)   # title, artist
-    discogs_requested = pyqtSignal(str, str) # artist, album
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._track: Optional[TrackMeta] = None
-        self._building = False
-        self._build()
-
-    def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
-
-        hdr = QLabel("Track Metadata")
-        hdr.setObjectName("section")
-        root.addWidget(hdr)
-
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setSpacing(6)
-
-        self._fields: dict[str, QLineEdit] = {}
-        for key, label in [
-            ("track_number", "Track #"),
-            ("title",        "Title"),
-            ("artist",       "Artist"),
-            ("album",        "Album"),
-            ("album_artist", "Album Artist"),
-            ("genre",        "Genre"),
-            ("year",         "Year"),
-            ("start",        "Start (s)"),
-            ("end",          "End (s)"),
-        ]:
-            le = QLineEdit()
-            le.setPlaceholderText(label)
-            self._fields[key] = le
-            form.addRow(label + ":", le)
-
-        root.addLayout(form)
-
-        # action buttons
-        btn_row = QHBoxLayout()
-        self._btn_save = QPushButton("💾  Save")
-        self._btn_save.setObjectName("accent")
-        self._btn_mb = QPushButton("🌐  MB Lookup")
-        self._btn_discogs = QPushButton("🎵  Discogs")
-        for b in (self._btn_save, self._btn_mb, self._btn_discogs):
-            btn_row.addWidget(b)
-
-        self._btn_save.clicked.connect(self._emit_save)
-        self._btn_mb.clicked.connect(self._emit_mb)
-        self._btn_discogs.clicked.connect(self._emit_discogs)
-
-        root.addLayout(btn_row)
-        root.addStretch()
-
-        self.set_track(None)
-
-    def set_track(self, t: Optional[TrackMeta]) -> None:
-        self._track = t
-        self._building = True
-        enabled = t is not None
-        for le in self._fields.values():
-            le.setEnabled(enabled)
-        for b in (self._btn_save, self._btn_mb, self._btn_discogs):
-            b.setEnabled(enabled)
-
-        if t:
-            for key, le in self._fields.items():
-                le.setText(str(getattr(t, key, "")))
-        else:
-            for le in self._fields.values():
-                le.clear()
-        self._building = False
-
-    def _emit_save(self) -> None:
-        if not self._track:
-            return
-        data: dict = {}
-        for key, le in self._fields.items():
-            val = le.text().strip()
-            if key in ("start", "end"):
-                try:
-                    data[key] = float(val)
-                except ValueError:
-                    pass
-            else:
-                data[key] = val
-        self.meta_changed.emit(data)
-
-    def _emit_mb(self) -> None:
-        self.mb_requested.emit(
-            self._fields["title"].text().strip(),
-            self._fields["artist"].text().strip(),
-        )
-
-    def _emit_discogs(self) -> None:
-        self.discogs_requested.emit(
-            self._fields["artist"].text().strip(),
-            self._fields["album"].text().strip(),
-        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2035,6 +1874,7 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_statusbar()
         self._check_deps()
+        self._populate_apply_strip()
 
     # ── toolbar ───────────────────────────────────────────────────────────
     def _build_toolbar(self) -> None:
@@ -2056,12 +1896,13 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         _act("🔇\nDetect Silence", "Run silence detection in Audacity",         self._detect_silence)
         _act("📥\nImport Labels",  "Import label markers from Audacity",        self._import_labels)
-        _act("✏\nAdd Track",       "Add a track region manually",               self._manual_add_track)
-        tb.addSeparator()
         _act("🔍\nFingerprint All","Fingerprint all tracks via AcoustID",       self._fingerprint_all)
         _act("💾\nExport All",     "Export and tag all tracks",                 self._export_all)
         tb.addSeparator()
         _act("🩺\nDiagnostics",    "Test pipe round-trip and show Audacity info", self._run_diagnostics)
+        tb.addSeparator()
+        _act("🌐\nMB Lookup",      "MusicBrainz lookup for selected track",        self._mb_lookup_selected)
+        _act("🎵\nDiscogs",        "Discogs lookup for selected track",             self._discogs_lookup_selected)
         tb.addSeparator()
 
         spacer = QWidget()
@@ -2080,18 +1921,46 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        root.addWidget(splitter, stretch=1)
+        # ── "Apply to All" strip ──────────────────────────────────────────
+        # One-click population of shared fields across all tracks.
+        apply_box = QGroupBox("Apply to All Tracks")
+        apply_box.setMaximumHeight(100)
+        apply_l = QGridLayout(apply_box)
+        apply_l.setContentsMargins(8, 6, 8, 6)
+        apply_l.setSpacing(4)
 
-        # ── left: track list ──────────────────────────────────────────────
-        left = QWidget()
-        left_l = QVBoxLayout(left)
-        left_l.setContentsMargins(0, 0, 0, 0)
-        left_l.setSpacing(4)
+        self._apply_fields: dict[str, QLineEdit] = {}
+        apply_defs = [
+            ("artist",       "Artist",       0, 0),
+            ("album",        "Album",        0, 2),
+            ("album_artist", "Album Artist", 0, 4),
+            ("genre",        "Genre",        1, 0),
+            ("year",         "Year",         1, 2),
+        ]
+        for key, label, row, col in apply_defs:
+            apply_l.addWidget(QLabel(label + ":"), row, col,
+                              Qt.AlignmentFlag.AlignRight)
+            le = QLineEdit()
+            le.setPlaceholderText(f"Apply {label} to all…")
+            le.setMinimumWidth(140)
+            self._apply_fields[key] = le
+            apply_l.addWidget(le, row, col + 1)
 
+        apply_btn = QPushButton("⚡  Apply to All")
+        apply_btn.setObjectName("accent")
+        apply_btn.setToolTip("Fill all tracks with the values entered above")
+        apply_btn.clicked.connect(self._apply_to_all)
+        apply_l.addWidget(apply_btn, 0, 6, 2, 1,
+                          Qt.AlignmentFlag.AlignVCenter)
+        apply_l.setColumnStretch(1, 1)
+        apply_l.setColumnStretch(3, 1)
+        apply_l.setColumnStretch(5, 1)
+        root.addWidget(apply_box)
+
+        # ── track table (full width, no side panel) ───────────────────────
         hdr = QLabel("Detected Tracks")
         hdr.setObjectName("section")
-        left_l.addWidget(hdr)
+        root.addWidget(hdr)
 
         self._model = TrackTableModel(self.tracks)
         self._table = QTableView()
@@ -2099,25 +1968,29 @@ class MainWindow(QMainWindow):
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked |
-                                    QAbstractItemView.EditTrigger.SelectedClicked)
+        # Double-click or F2 to edit any metadata cell in-place
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked |
+            QAbstractItemView.EditTrigger.EditKeyPressed
+        )
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
         for col, w in enumerate(_COL_W):
             self._table.setColumnWidth(col, w)
         self._table.verticalHeader().setVisible(False)
-        self._table.verticalHeader().setDefaultSectionSize(26)
-        self._table.selectionModel().currentRowChanged.connect(self._on_row_changed)
-        left_l.addWidget(self._table)
+        self._table.verticalHeader().setDefaultSectionSize(28)
+        # No longer connect currentRowChanged to detail panel
+        root.addWidget(self._table, stretch=1)
 
-        # row action buttons
+        # ── row action buttons ────────────────────────────────────────────
         btn_row = QHBoxLayout()
         for label, tip, slot in [
-            ("▲",           "Move track up",        self._move_up),
-            ("▼",           "Move track down",       self._move_down),
-            ("✕ Remove",    "Remove selected track", self._remove_track),
-            ("🔍 Fingerprint","Fingerprint selection",self._fingerprint_selected),
-            ("💾 Export",   "Export selection",      self._export_selected),
+            ("▲",             "Move track up",          self._move_up),
+            ("▼",             "Move track down",         self._move_down),
+            ("✕ Remove",      "Remove selected track",   self._remove_track),
+            ("✏ Add Track",   "Add a track manually",    self._manual_add_track),
+            ("🔍 Fingerprint", "Fingerprint selection",  self._fingerprint_selected),
+            ("💾 Export",     "Export selection",        self._export_selected),
         ]:
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -2126,17 +1999,7 @@ class MainWindow(QMainWindow):
                 b.setObjectName("danger")
             btn_row.addWidget(b)
         btn_row.addStretch()
-        left_l.addLayout(btn_row)
-
-        splitter.addWidget(left)
-
-        # ── right: detail panel ───────────────────────────────────────────
-        self._detail = DetailPanel()
-        self._detail.meta_changed.connect(self._apply_detail_changes)
-        self._detail.mb_requested.connect(self._mb_lookup_selected)
-        self._detail.discogs_requested.connect(self._discogs_lookup_selected)
-        splitter.addWidget(self._detail)
-        splitter.setSizes([700, 320])
+        root.addLayout(btn_row)
 
         # ── log ───────────────────────────────────────────────────────────
         log_box = QGroupBox("Log")
@@ -2145,7 +2008,7 @@ class MainWindow(QMainWindow):
         self._log_view = QTextEdit()
         self._log_view.setObjectName("log")
         self._log_view.setReadOnly(True)
-        self._log_view.setMaximumHeight(140)
+        self._log_view.setMaximumHeight(120)
         log_l.addWidget(self._log_view)
         root.addWidget(log_box)
 
@@ -2357,24 +2220,34 @@ class MainWindow(QMainWindow):
         self._log(f"Imported {len(new_tracks)} track(s) from Audacity labels.")
 
     # ── track list actions ────────────────────────────────────────────────
+    def _populate_apply_strip(self) -> None:
+        """Pre-fill the Apply strip from config defaults."""
+        sec = self.cfg["vinyl_ripper"]
+        for key, le in self._apply_fields.items():
+            val = sec.get(f"default_{key}", "")
+            if val:
+                le.setText(val)
+
+    def _apply_to_all(self) -> None:
+        """Copy non-empty Apply strip values to every track."""
+        if not self.tracks:
+            return
+        values = {k: le.text().strip()
+                  for k, le in self._apply_fields.items()
+                  if le.text().strip()}
+        if not values:
+            return
+        for t in self.tracks:
+            for k, v in values.items():
+                setattr(t, k, v)
+        self._model.refresh_all()
+        self._log(f"Applied {', '.join(values)} to all {len(self.tracks)} track(s).")
+
     def _current_row(self) -> int:
         return self._table.currentIndex().row()
 
     def _on_row_changed(self, current: QModelIndex, _prev: QModelIndex) -> None:
-        row = current.row()
-        if 0 <= row < len(self.tracks):
-            self._detail.set_track(self.tracks[row])
-        else:
-            self._detail.set_track(None)
-
-    def _apply_detail_changes(self, data: dict) -> None:
-        row = self._current_row()
-        if row < 0 or row >= len(self.tracks):
-            return
-        t = self.tracks[row]
-        for k, v in data.items():
-            setattr(t, k, v)
-        self._model.refresh_row(row)
+        pass  # detail panel removed; in-place table editing handles all changes
 
     def _move_up(self) -> None:
         row = self._current_row()
@@ -2400,7 +2273,6 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             self._model.remove_row(row)
-            self._detail.set_track(None)
 
     def _manual_add_track(self) -> None:
         dlg = ManualTrackDialog(self)
@@ -2442,9 +2314,6 @@ class MainWindow(QMainWindow):
         for k, v in updates.items():
             setattr(t, k, v)
         self._model.refresh_row(row)
-        # refresh detail panel if this row is selected
-        if self._current_row() == row:
-            self._detail.set_track(t)
 
     # ── export ────────────────────────────────────────────────────────────
     def _export_selected(self) -> None:
@@ -2472,6 +2341,7 @@ class MainWindow(QMainWindow):
             sec["default_album_artist"] = ref.album_artist
             sec["default_genre"]        = ref.genre
             save_config(self.cfg)
+            self._populate_apply_strip()
         self._model.refresh_all()
         self._run_export(list(range(len(self.tracks))))
 
@@ -2502,33 +2372,44 @@ class MainWindow(QMainWindow):
         self._log("Done.")
 
     # ── manual MB / Discogs lookup ────────────────────────────────────────
-    def _mb_lookup_selected(self, title: str, artist: str) -> None:
+    def _mb_lookup_selected(self, title: str = "", artist: str = "") -> None:
+        """MusicBrainz lookup for the selected track (also callable from toolbar)."""
+        row = self._current_row()
+        if row < 0:
+            QMessageBox.information(self, "No Selection", "Select a track first.")
+            return
+        t = self.tracks[row]
+        title  = title  or t.title
+        artist = artist or t.artist
         self._log(f"MusicBrainz search: '{title}' by '{artist}'…")
         meta = mb_search(title, artist)
-        row = self._current_row()
-        if meta and row >= 0:
-            t = self.tracks[row]
-            FingerprintWorker._merge(meta, meta, t)  # reuse helper
+        if meta:
+            FingerprintWorker._merge(meta, meta, t)
             for k, v in meta.items():
                 if v:
                     setattr(t, k, v)
             self._model.refresh_row(row)
-            self._detail.set_track(t)
             self._log(f"  MB: {t.title} / {t.artist} / {t.album}")
         else:
             self._log("  No MusicBrainz result found.")
 
-    def _discogs_lookup_selected(self, artist: str, album: str) -> None:
-        token = self.cfg["vinyl_ripper"].get("discogs_token", "")
+    def _discogs_lookup_selected(self, artist: str = "", album: str = "") -> None:
+        """Discogs lookup for the selected track (also callable from toolbar)."""
+        row = self._current_row()
+        if row < 0:
+            QMessageBox.information(self, "No Selection", "Select a track first.")
+            return
+        t = self.tracks[row]
+        artist = artist or t.artist
+        album  = album  or t.album
+        token  = self.cfg["vinyl_ripper"].get("discogs_token", "")
         if not token:
             QMessageBox.warning(self, "Discogs",
                                 "Add your Discogs personal token in Settings → API Keys.")
             return
         self._log(f"Discogs search: '{artist}' / '{album}'…")
         meta = discogs_search(artist, album, token)
-        row = self._current_row()
-        if meta and row >= 0:
-            t = self.tracks[row]
+        if meta:
             for k, v in [("album_artist", meta.get("album_artist","")),
                          ("genre",        meta.get("genre","")),
                          ("year",         meta.get("year",""))]:
@@ -2537,7 +2418,6 @@ class MainWindow(QMainWindow):
             if meta.get("release_id"):
                 t.discogs_release_id = meta["release_id"]
             self._model.refresh_row(row)
-            self._detail.set_track(t)
             self._log(f"  Discogs: album_artist={t.album_artist} genre={t.genre}")
         else:
             self._log("  No Discogs result found.")
