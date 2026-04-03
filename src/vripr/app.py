@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,7 +36,7 @@ from typing import Optional
 # ── PyQt6 ─────────────────────────────────────────────────────────────────
 from PyQt6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QThread, pyqtSignal, QObject,
-    QSortFilterProxyModel, QItemSelectionModel,
+    QSortFilterProxyModel, QItemSelectionModel, QTimer,
 )
 from PyQt6.QtGui import QColor, QFont, QIcon, QPalette, QAction
 from PyQt6.QtWidgets import (
@@ -271,6 +272,7 @@ DEFAULTS: dict[str, str] = {
     "default_genre":       "",
     "default_year":        "",
     "mb_user_agent":       "VinylRipper/1.0 ( vinyl-ripper@example.com )",
+    "audio_file":          "",    # explicit path to WAV/FLAC for Python scanner
 }
 
 
@@ -304,33 +306,319 @@ else:
     _EOL      = "\n"
 
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Audacity window focus helper  (module-level so all workers can share it)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _raise_audacity_window() -> None:
+    """Best-effort: bring the Audacity project window to the foreground.
+
+    Audacity's Analyze-menu effects (SilenceFind) and project-modifying
+    commands (SelectTime, SelectTracks, Export2) require the project window
+    to have OS focus when the scripting command is processed.
+
+    Tries three OS-level approaches in order; all failures are silent.
+    The Audacity native ``Raise:`` pipe command is handled separately by
+    AudacityPipe.raise_focus() before this function is called.
+    """
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Audacity" to activate'],
+                timeout=3, capture_output=True
+            )
+        except Exception:
+            pass
+
+    elif sys.platform.startswith("linux"):
+        # wmctrl is the most reliable on X11/Wayland-XWayland
+        try:
+            subprocess.run(["wmctrl", "-a", "Audacity"],
+                           timeout=3, capture_output=True)
+            return
+        except Exception:
+            pass
+        # Fallback: xdotool
+        try:
+            r = subprocess.run(
+                ["xdotool", "search", "--name", "Audacity"],
+                timeout=3, capture_output=True, text=True
+            )
+            wids = r.stdout.strip().splitlines()
+            if wids:
+                subprocess.run(
+                    ["xdotool", "windowactivate", "--sync", wids[0]],
+                    timeout=3, capture_output=True
+                )
+        except Exception:
+            pass
+
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            found: list[int] = []
+            EnumWindowsProc = ctypes.WINFUNCTYPE(
+                ctypes.c_bool,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
+            )
+            def _cb(hwnd, _):
+                n = user32.GetWindowTextLengthW(hwnd)
+                if n:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    user32.GetWindowTextW(hwnd, buf, n + 1)
+                    if "Audacity" in buf.value:
+                        found.append(hwnd)
+                return True
+            user32.EnumWindows(EnumWindowsProc(_cb), 0)
+            if found:
+                user32.SetForegroundWindow(found[0])
+        except Exception:
+            pass
+
+
 class AudacityPipe:
+    """Manages the mod-script-pipe connection to Audacity.
+
+    Pipe lifecycle rules
+    --------------------
+    * Audacity **creates** the pipe files when it starts (if mod-script-pipe
+      is enabled).  We must never create or delete them — only open/close them.
+    * On POSIX the pipes are FIFOs.  Opening a FIFO for *writing* blocks until
+      a reader is on the other end, and opening for *reading* blocks until a
+      writer is present.  Audacity opens both ends when it starts; once it is
+      running both opens complete instantly.
+    * If vripr crashes or is killed while the pipes are open, the FIFO inodes
+      remain (they are owned by Audacity).  Audacity will recreate / reuse them
+      on its next startup.  We must NOT delete them — that would cause exactly
+      the startup crash you observed.
+    * On Windows the pipes are named pipes created by Audacity; we just open
+      them as clients.
+    """
+
     def __init__(self) -> None:
+        self._to      = None
+        self._from_   = None
+        self.connected = False
+
+    # ── pre-connect checks ────────────────────────────────────────────────
+    @staticmethod
+    def check_pipes() -> tuple[bool, str]:
+        """Return (pipes_exist, message).
+
+        Call this *before* connect() to give the user an early, clear error
+        rather than a confusing FileNotFoundError.
+        """
+        if sys.platform == "win32":
+            # Windows named pipes only exist while Audacity is running.
+            import ctypes
+            GENERIC_READ  = 0x80000000
+            OPEN_EXISTING = 3
+            h = ctypes.windll.kernel32.CreateFileW(
+                _FROMFILE, GENERIC_READ, 0, None, OPEN_EXISTING, 0, None
+            )
+            INVALID = ctypes.c_void_p(-1).value
+            if h == INVALID:
+                return False, (
+                    "Audacity named pipes not found.\n"
+                    "Make sure Audacity is running and mod-script-pipe is Enabled."
+                )
+            ctypes.windll.kernel32.CloseHandle(h)
+            return True, "OK"
+        else:
+            to_ok   = Path(_TOFILE).exists()
+            from_ok = Path(_FROMFILE).exists()
+            if not to_ok and not from_ok:
+                return False, (
+                    f"Pipe files not found:\n  {_TOFILE}\n  {_FROMFILE}\n\n"
+                    "Audacity is not running, or mod-script-pipe is not Enabled.\n"
+                    "Enable it at: Edit → Preferences → Modules → mod-script-pipe"
+                    " → Enabled, then restart Audacity."
+                )
+            if not to_ok or not from_ok:
+                missing = _TOFILE if not to_ok else _FROMFILE
+                return False, (
+                    f"Only one pipe file found (missing: {missing}).\n"
+                    "Restart Audacity to recreate both pipes."
+                )
+            # Check they are actually FIFOs, not regular stale files from a
+            # different process — regular files would make open() hang forever.
+            import stat as _stat
+            for path in (_TOFILE, _FROMFILE):
+                mode = Path(path).stat().st_mode
+                if not _stat.S_ISFIFO(mode):
+                    return False, (
+                        f"{path} exists but is not a FIFO (it is a regular file).\n"
+                        "This is a leftover from a crashed process.  Delete it and "
+                        "restart Audacity:\n  rm {_TOFILE} {_FROMFILE}"
+                    )
+            return True, "OK"
+
+    def connect(self) -> tuple[bool, str]:
+        """Open the pipe.  Returns (success, error_message).
+
+        We mirror pipe_test.py exactly: plain blocking open() in text mode,
+        explicit utf-8 encoding on the read end.  Both opens are run in daemon
+        threads with a timeout so that if Audacity hasn't opened its end yet
+        (mod-script-pipe disabled, Audacity still starting) we get a clean
+        error rather than hanging forever.
+
+        All send() calls already run inside QThread workers, so plain blocking
+        readline() in send() is fine — it only blocks the worker thread, not
+        the Qt main / event-loop thread.
+        """
+        ok, msg = self.check_pipes()
+        if not ok:
+            return False, msg
+
+        import queue as _q
+        to_q:   _q.Queue = _q.Queue()
+        from_q: _q.Queue = _q.Queue()
+        timeout_s = 5.0
+
+        def _open_to():
+            try:
+                # Text mode, line-buffered (buffering=1) so flush() is instant
+                to_q.put(open(_TOFILE, "w", buffering=1))
+            except Exception as e:
+                to_q.put(e)
+
+        def _open_from():
+            try:
+                # Explicit utf-8, line-buffered — matches pipe_test.py
+                from_q.put(open(_FROMFILE, "r", encoding="utf-8", buffering=1))
+            except Exception as e:
+                from_q.put(e)
+
+        t1 = threading.Thread(target=_open_to,   daemon=True)
+        t2 = threading.Thread(target=_open_from, daemon=True)
+        t1.start(); t2.start()
+        t1.join(timeout_s); t2.join(timeout_s)
+
+        if t1.is_alive() or t2.is_alive():
+            return False, (
+                f"Opening the pipe timed out after {timeout_s:.0f} s.\n\n"
+                "Audacity has not opened its end of the pipe.\n"
+                "Check: Edit → Preferences → Modules → mod-script-pipe = Enabled,\n"
+                "then restart Audacity and try again."
+            )
+
+        to_val   = to_q.get()
+        from_val = from_q.get()
+        if isinstance(to_val,   Exception): return False, f"Write pipe error: {to_val}"
+        if isinstance(from_val, Exception): return False, f"Read pipe error:  {from_val}"
+
+        self._to    = to_val
+        self._from_ = from_val
+        self.connected = True
+        return True, "OK"
+
+    def disconnect(self) -> None:
+        """Close our file handles.  Does NOT delete the pipe files — those
+        belong to Audacity and must not be removed by us."""
+        for f in (self._to, self._from_):
+            try:
+                if f:
+                    f.close()
+            except Exception:
+                pass
         self._to = self._from_ = None
         self.connected = False
 
-    def connect(self) -> bool:
-        try:
-            self._to    = open(_TOFILE,   "w")
-            self._from_ = open(_FROMFILE, "r")
-            self.connected = True
-            return True
-        except (FileNotFoundError, PermissionError) as exc:
-            print(f"[Pipe] {exc}")
-            return False
+    def close(self) -> None:
+        """Alias for disconnect() — kept for compatibility."""
+        self.disconnect()
 
-    def send(self, cmd: str) -> str:
+    def send(self, cmd: str, timeout: float = 30.0,
+             needs_focus: bool = True) -> str:
+        """Send *cmd* to Audacity and return the full response text.
+
+        Mirrors pipe_test.py: write the command + newline, flush, then read
+        lines until the sentinel arrives.  The blocking readline() is safe
+        here because send() is ALWAYS called from a QThread worker, never
+        from the Qt main/event-loop thread.
+
+        Parameters
+        ----------
+        cmd          : Audacity scripting command string
+        timeout      : seconds to wait for the sentinel before raising TimeoutError
+        needs_focus  : if True (default), raise the Audacity window before
+                       sending.  Audacity queues commands but only processes
+                       them when its project window has OS focus — on this
+                       system we observed ~39 s delays without focus.
+                       Set False only for fire-and-forget or read-only queries
+                       where stealing focus would be disruptive (e.g. heartbeat).
+        """
         if not self.connected:
             return ""
+
+        # Raise Audacity window before sending any command that needs it.
+        # This is a no-op if focus is already held; cost is ~200-500 ms.
+        if needs_focus:
+            try:
+                self._to.write("Raise:" + _EOL)
+                self._to.flush()
+                time.sleep(0.1)
+            except Exception:
+                pass
+            _raise_audacity_window()
+            time.sleep(0.3)   # let WM complete focus switch
+
+        # Write — identical to pipe_test.py
         self._to.write(cmd + _EOL)
         self._to.flush()
+
         lines: list[str] = []
-        while True:
-            line = self._from_.readline().rstrip("\n\r")
-            if line in ("BatchCommand finished: OK", "BatchCommand finished: Failed"):
-                break
-            lines.append(line)
-        return "\n".join(lines)
+
+        # ── Watchdog timer ─────────────────────────────────────────────────
+        # Sets timed_out[0] = True after *timeout* seconds.  The read loop
+        # checks this flag and raises TimeoutError so we exit cleanly even
+        # though readline() is blocking.
+        import queue as _q
+        timed_out: list[bool] = [False]
+        result_q:  _q.Queue   = _q.Queue()
+
+        def _read_loop():
+            try:
+                while True:
+                    if timed_out[0]:
+                        result_q.put(TimeoutError(
+                            f"Audacity did not respond to {cmd!r} within {timeout}s.\n"
+                            "Ensure a project is open in Audacity and no dialog is blocking it."
+                        ))
+                        return
+                    line = self._from_.readline()
+                    if not line:
+                        # EOF — Audacity closed the pipe (crashed / quit)
+                        result_q.put(ConnectionResetError(
+                            "Audacity closed the pipe (EOF). Has it crashed?"
+                        ))
+                        return
+                    line = line.rstrip("\n\r")
+                    if line in ("BatchCommand finished: OK",
+                                "BatchCommand finished: Failed"):
+                        result_q.put("\n".join(lines))
+                        return
+                    if line:
+                        lines.append(line)
+            except Exception as exc:
+                result_q.put(exc)
+
+        def _watchdog():
+            time.sleep(timeout)
+            timed_out[0] = True
+
+        reader  = threading.Thread(target=_read_loop, daemon=True)
+        watcher = threading.Thread(target=_watchdog,  daemon=True)
+        reader.start()
+        watcher.start()
+
+        result = result_q.get()   # blocks until _read_loop puts something
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def close(self) -> None:
         for f in (self._to, self._from_):
@@ -339,8 +627,98 @@ class AudacityPipe:
         self.connected = False
 
     # helpers
-    def add_silence_labels(self, threshold_db: float, min_dur: float) -> None:
-        self.send(f"SilenceFind: Threshold={threshold_db:.1f} Minimum={min_dur:.2f}")
+    def ping(self) -> tuple[bool, str]:
+        """Send a lightweight command and return (ok, response_text).
+
+        We use a 60 s timeout because Audacity queues commands and only
+        processes them when its window has focus — on some systems this means
+        a query can sit for 30-40 s before being answered.  We do NOT raise
+        focus here (that would steal focus every 10 s during normal use).
+        """
+        try:
+            raw = self.send("GetInfo: Type=Tracks Format=JSON",
+                            timeout=60.0, needs_focus=False)
+            return True, raw
+        except TimeoutError:
+            return False, "timeout"
+        except Exception as exc:
+            return False, str(exc)
+
+    def get_version(self) -> str:
+        """Return the Audacity version string, or empty string on failure."""
+        try:
+            raw = self.send("GetInfo: Type=Commands Format=JSON", timeout=8.0)
+            # Audacity 3.x: try dedicated version command first
+            raw2 = self.send("Version:", timeout=5.0)
+            if raw2.strip():
+                return raw2.strip()
+        except Exception:
+            pass
+        return ""
+
+    def raise_focus(self) -> None:
+        """Raise the Audacity window before sending any focus-dependent command.
+
+        Commands that NEED focus (they run Audacity menu actions):
+            SilenceFind:  SelectTime:  SelectTracks:  Export2:
+
+        Commands that do NOT need focus (read-only queries):
+            GetInfo:  Version:  Raise:
+
+        Strategy:
+          1. Send the native ``Raise:`` pipe command (fire-and-forget, raw write
+             so we don't block waiting for a sentinel that may not arrive).
+          2. Let the OS-level helper do wmctrl/xdotool/osascript/ctypes.
+          3. Sleep 0.5 s to let the window manager complete the focus switch.
+        """
+        # Step 1 — native Raise: via raw write (no blocking send())
+        try:
+            self._to.write("Raise:" + _EOL)
+            self._to.flush()
+            time.sleep(0.2)
+        except Exception:
+            pass
+        # Step 2 — OS-level raise
+        _raise_audacity_window()
+        # Step 3 — let WM settle
+        time.sleep(0.5)
+
+    def label_sounds(self, threshold_db: float, min_silence_s: float,
+                     min_label_interval_s: float = 0.0) -> None:
+        """Run the 'Label Sounds' Nyquist plugin via its scripting ID.
+
+        This is the correct silence/track-detection command in Audacity 3.x
+        on Linux — SilenceFind is not exposed as a scripting command.
+
+        Label Sounds parameters (all optional, these are the defaults):
+          threshold_db          : -40   level below which audio is 'silent'
+          min_silence_duration  : 1.0   minimum gap to count as silence (s)
+          min_label_interval    : 0.0   minimum time between labels (s)
+          label_type            : 0     0=before sound, 1=around sound,
+                                        2=around silence
+          pre_label_time        : 0.0   time before sound to place label
+          post_label_time       : 0.0   time after sound to place label
+          text_type             : 0     0=none, 1=number, 2=text
+          text                  : ""    label text (if text_type=2)
+        """
+        # Nyquist plugin scripting ID from GetInfo:Type=Menus output
+        plugin_id = (
+            "Effect_Nyquist_Steve Daulton_Label Sounds_"
+            "/usr/share/audacity/plug-ins/label-sounds.ny"
+        )
+        # Parameters use Nyquist plugin parameter names
+        cmd = (
+            f"{plugin_id}: "
+            f"threshold={threshold_db:.1f} "
+            f"min-silence={min_silence_s:.2f} "
+            f"min-interval={min_label_interval_s:.2f} "
+            f"label-type=0 "    # 0 = place label before each sound region
+            f"pre-label=0.0 "
+            f"post-label=0.0 "
+            f"text-type=1 "     # 1 = number labels sequentially
+            f"text=''"
+        )
+        self.send(cmd, timeout=180.0)
 
     def get_labels(self) -> list:
         raw = self.send("GetInfo: Type=Labels Format=JSON")
@@ -350,10 +728,12 @@ class AudacityPipe:
             return []
 
     def select_audio(self, start: float, end: float, track: int = 0) -> None:
+        """Select a time region in Audacity (focus handled by send())."""
         self.send(f"SelectTime: Start={start:.3f} End={end:.3f} RelativeTo=ProjectStart")
         self.send(f"SelectTracks: Track={track} TrackCount=1 Mode=Set")
 
     def export_selection(self, filepath: str, fmt: str = "FLAC") -> None:
+        """Export the current selection (focus-dependent)."""
         escaped = filepath.replace("\\", "/")
         self.send(f"Export2: Filename='{escaped}' NumChannels=2")
 
@@ -656,6 +1036,427 @@ def apply_tags(filepath: str, meta: TrackMeta) -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Worker threads  (Qt signals/slots — no shared state hacks)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Connection-verification worker  (runs once on Connect)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class ConnectVerifyWorker(QThread):
+    """Fired once after the pipe opens.  Sends a round-trip command to confirm
+    Audacity is actually responding and reports the version + track count."""
+    log     = pyqtSignal(str)
+    ok      = pyqtSignal(str)    # version / info string
+    failed  = pyqtSignal(str)    # error message
+
+    def __init__(self, pipe: "AudacityPipe") -> None:
+        super().__init__()
+        self._pipe = pipe
+
+    def run(self) -> None:
+        self.log.emit("  Verifying Audacity round-trip…")
+        self.log.emit(f"  Write pipe fd : {self._pipe._to.fileno() if self._pipe._to else 'None'}")
+        self.log.emit(f"  Read  pipe fd : {self._pipe._from_.fileno() if self._pipe._from_ else 'None'}")
+
+        # ── Step 0: raise Audacity window before ANY command ──────────────
+        # Audacity queues scripting commands but only processes them when its
+        # project window has OS focus.  On this system we observed a ~39 s
+        # delay when focus was not given — the command sat in the queue until
+        # the window manager eventually switched focus.  Raising first ensures
+        # the very first GetInfo is processed immediately.
+        self.log.emit("  Sending GetInfo (focus handled automatically)…")
+
+        # ── Step 1: GetInfo:Type=Tracks  (simplest always-valid command) ──
+        self.log.emit("  Sending: GetInfo: Type=Tracks Format=JSON")
+        try:
+            raw = self._pipe.send("GetInfo: Type=Tracks Format=JSON", timeout=45.0)
+            self.log.emit(f"  Raw response ({len(raw)} chars): {raw[:200]!r}")
+        except TimeoutError as exc:
+            self.log.emit(f"  ✗ Timeout: {exc}")
+            self.failed.emit(
+                "Pipe opened and both FIFOs are connected, but Audacity sent\n"
+                "no response to 'GetInfo: Type=Tracks' within 45 seconds.\n\n"
+                "Audacity may only process scripting commands when its project\n"
+                "window has OS focus.  Try:\n"
+                "  1. Click the Audacity project window to give it focus,\n"
+                "     then click Connect again in vripr.\n"
+                "  2. Install wmctrl for automatic focus on Linux:\n"
+                "     sudo apt install wmctrl\n"
+                "  3. Confirm mod-script-pipe shows 'Enabled':\n"
+                "     Edit → Preferences → Modules\n"
+                "  4. Make sure a project is open (File → New or open a file).\n"
+                "  5. Try Audacity's own pipe test: pipe_test.py"
+            )
+            return
+        except ConnectionResetError as exc:
+            self.failed.emit(
+                f"Audacity closed the pipe unexpectedly: {exc}\n"
+                "This usually means Audacity crashed or mod-script-pipe\n"
+                "encountered an error. Check the Audacity log."
+            )
+            return
+        except Exception as exc:
+            self.failed.emit(f"Unexpected error during GetInfo: {exc}")
+            return
+
+        # ── Step 2: parse and report ───────────────────────────────────────
+        try:
+            tracks = json.loads(raw)
+            n_tracks = len(tracks)
+            self.log.emit(f"  Parsed {n_tracks} track(s) from JSON")
+        except Exception as e:
+            self.log.emit(f"  JSON parse failed ({e}) — raw: {raw[:100]!r}")
+            n_tracks = -1
+
+        # ── Step 3: Version: command (Audacity 3.2+, optional) ────────────
+        version_str = ""
+        self.log.emit("  Sending: Version:")
+        try:
+            version_str = self._pipe.send("Version:", timeout=5.0).strip()
+            self.log.emit(f"  Version response: {version_str!r}")
+        except TimeoutError:
+            self.log.emit("  Version: timed out (pre-3.2 Audacity — that's OK)")
+        except Exception as exc:
+            self.log.emit(f"  Version: error: {exc}")
+
+        track_info = (f"{n_tracks} track(s) in project"
+                      if n_tracks >= 0 else "project info unavailable")
+        info = (f"Audacity {version_str}  —  {track_info}"
+                if version_str else track_info)
+        self.log.emit(f"  ✓ Round-trip OK  [{info}]")
+        self.ok.emit(info)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Silence-detection + label-import worker
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class SilenceWorker(QThread):
+    """Detects silence in the audio file directly in Python, then derives
+    track regions — no Audacity DSP or focus required.
+    All pipe I/O runs in this worker thread; the Qt event loop stays free.
+    """
+    log          = pyqtSignal(str)
+    tracks_ready = pyqtSignal(list)   # list[TrackMeta]
+    error        = pyqtSignal(str)
+
+    def __init__(
+        self,
+        pipe: "AudacityPipe",
+        cfg: configparser.ConfigParser,
+        run_detect: bool = True,      # False → skip scan, just import existing labels
+    ) -> None:
+        super().__init__()
+        self._pipe       = pipe
+        self._cfg        = cfg
+        self._run_detect = run_detect
+
+    # ── Python-native silence detection ──────────────────────────────────
+    @staticmethod
+    def _detect_silences_python(
+        wav_path: str,
+        threshold_db: float,
+        min_silence_s: float,
+    ) -> list[tuple[float, float]]:
+        """Detect silence regions in a WAV file entirely in Python.
+
+        Returns a list of (start_s, end_s) tuples for each silence region.
+        Does not require Audacity focus.  Uses only stdlib wave + array;
+        numpy/scipy are used if available for speed but are not required.
+        """
+        import wave as _wave
+        import array as _array
+        import math
+
+        with _wave.open(wav_path, "rb") as wf:
+            n_ch    = wf.getnchannels()
+            sampw   = wf.getsampwidth()
+            rate    = wf.getframerate()
+            n_frames = wf.getnframes()
+
+            # Read in chunks of 0.1 s to keep memory reasonable
+            chunk_frames = int(rate * 0.1)
+            thresh_linear = 10 ** (threshold_db / 20.0)
+
+            silences: list[tuple[float, float]] = []
+            silence_start: float | None = None
+            pos = 0
+
+            while pos < n_frames:
+                to_read = min(chunk_frames, n_frames - pos)
+                raw = wf.readframes(to_read)
+                pos += to_read
+
+                # Convert raw bytes to samples
+                if sampw == 2:
+                    samples = _array.array("h", raw)   # signed 16-bit
+                    peak = 32768.0
+                elif sampw == 3:
+                    # 24-bit — unpack manually
+                    n = len(raw) // 3
+                    samples = []
+                    for i in range(n):
+                        b = raw[i*3:(i+1)*3]
+                        val = int.from_bytes(b, "little", signed=True)
+                        samples.append(val)
+                    peak = 8388608.0
+                elif sampw == 4:
+                    samples = _array.array("i", raw)
+                    peak = 2147483648.0
+                else:
+                    samples = _array.array("B", raw)
+                    peak = 128.0
+
+                # RMS across all channels in this chunk
+                rms = math.sqrt(
+                    sum(s * s for s in samples) / max(len(samples), 1)
+                ) / peak
+
+                t = (pos - to_read) / rate
+                if rms < thresh_linear:
+                    if silence_start is None:
+                        silence_start = t
+                else:
+                    if silence_start is not None:
+                        dur = t - silence_start
+                        if dur >= min_silence_s:
+                            silences.append((silence_start, t))
+                        silence_start = None
+
+            # Handle trailing silence
+            if silence_start is not None:
+                dur = n_frames / rate - silence_start
+                if dur >= min_silence_s:
+                    silences.append((silence_start, n_frames / rate))
+
+        return silences
+
+    def run(self) -> None:
+        sec     = self._cfg["vinyl_ripper"]
+        thresh  = float(sec.get("silence_threshold_db", "-40"))
+        min_dur = float(sec.get("silence_min_duration", "1.5"))
+
+        # ── step 1: get project info from Audacity ───────────────────────────
+        self.log.emit("  Querying Audacity for project info…")
+        audio_file  = ""
+        project_end = 0.0
+        try:
+            raw    = self._pipe.send("GetInfo: Type=Tracks Format=JSON", timeout=30.0)
+            tracks = json.loads(raw)
+            for t in tracks:
+                project_end = max(project_end, float(t.get("end", 0)))
+                src = t.get("src", "") or t.get("file", "")
+                if src and Path(src).exists() and not audio_file:
+                    audio_file = src
+            self.log.emit(f"  Project duration: {project_end:.1f}s")
+        except Exception as exc:
+            self.error.emit(f"Could not query Audacity project info: {exc}")
+            return
+
+        # ── step 2: get audio file path from Recent Files if not in tracks ──
+        # Audacity 3.x does not always include the file path in GetInfo:Tracks.
+        # We can recover it from the Recent Files submenu which always lists it.
+        # Also check the config-stored path (set in Settings → Audio File)
+        if not audio_file:
+            cfg_path = sec.get("audio_file", "").strip()
+            if cfg_path and Path(cfg_path).exists():
+                audio_file = cfg_path
+                self.log.emit(f"  Using configured audio file: {Path(cfg_path).name}")
+
+        if not audio_file:
+            self.log.emit("  Checking Recent Files for audio path…")
+            try:
+                raw   = self._pipe.send("GetInfo: Type=Menus Format=JSON", timeout=20.0)
+                menus = json.loads(raw)
+                for item in menus:
+                    lbl = item.get("label", "")
+                    if lbl and lbl != "----" and not lbl.startswith("/usr/lib"):
+                        p = Path(lbl)
+                        if p.exists() and p.suffix.lower() in (
+                            ".wav", ".flac", ".aif", ".aiff", ".mp3", ".ogg", ".m4a"
+                        ):
+                            audio_file = str(p)
+                            self.log.emit(f"  Found via Recent Files: {p.name}")
+                            break
+            except Exception as exc:
+                self.log.emit(f"  Recent Files lookup failed: {exc}")
+
+        # ── step 3: silence detection ─────────────────────────────────────────
+        if self._run_detect:
+            self.log.emit(
+                f"Running silence detection (threshold={thresh} dB, min={min_dur}s)…"
+            )
+
+            # ── Strategy A: Label Sounds via Audacity pipe ────────────────────
+            # Label Sounds is the correct Nyquist plugin for this Audacity build.
+            # It places numbered point labels at the start of each sound region.
+            label_sounds_ok = False
+            self.log.emit("  Trying Label Sounds plugin via pipe…")
+            try:
+                self._pipe.label_sounds(thresh, min_dur)
+                # Verify labels were actually created
+                raw    = self._pipe.send("GetInfo: Type=Labels Format=JSON", timeout=15.0)
+                ldata  = json.loads(raw)
+                n_lbls = sum(len(e[1]) for e in ldata if len(e) >= 2)
+                if n_lbls > 0:
+                    self.log.emit(f"  Label Sounds created {n_lbls} label(s) ✓")
+                    label_sounds_ok = True
+                else:
+                    self.log.emit("  Label Sounds ran but created no labels — "
+                                  "trying Python scanner…")
+            except TimeoutError:
+                self.log.emit("  Label Sounds timed out — trying Python scanner…")
+            except Exception as exc:
+                self.log.emit(f"  Label Sounds error: {exc} — trying Python scanner…")
+
+            if label_sounds_ok:
+                # Labels are already in Audacity — fall through to Import Labels path
+                self.log.emit("Silence detection complete — importing labels…")
+            else:
+                # ── Strategy B: Python-native scanner ────────────────────────
+                if not audio_file:
+                    self.error.emit(
+                        "Label Sounds did not run and the audio file path could\n"
+                        "not be determined automatically.\n\n"
+                        "Please specify the WAV file path in Settings → Audio File,\n"
+                        "or place labels manually in Audacity and use Import Labels."
+                    )
+                    return
+
+                self.log.emit(f"  Scanning: {Path(audio_file).name}")
+                try:
+                    silence_regions = self._detect_silences_python(
+                        audio_file, thresh, min_dur
+                    )
+                except Exception as exc:
+                    self.error.emit(f"Python silence detection failed: {exc}")
+                    return
+
+                self.log.emit(
+                    f"  Found {len(silence_regions)} silence region(s) — "
+                    f"deriving track boundaries…"
+                )
+                self._derive_tracks_from_silences(silence_regions, sec, project_end)
+                return
+
+        # ── Import Labels path (run_detect=False) ────────────────────────────
+        # User has placed labels manually in Audacity; just read them back.
+        self.log.emit("Importing labels from Audacity…")
+        try:
+            raw = self._pipe.send("GetInfo: Type=Labels Format=JSON", timeout=30.0)
+        except Exception as exc:
+            self.error.emit(f"GetInfo (labels) failed: {exc}")
+            return
+
+        try:
+            label_data = json.loads(raw)
+        except Exception:
+            self.error.emit("Could not parse label data from Audacity.")
+            return
+
+        all_labels: list[tuple[float, float, str]] = []
+        for entry in label_data:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                for lbl in entry[1]:
+                    all_labels.append((float(lbl[0]), float(lbl[1]), str(lbl[2])))
+        all_labels.sort(key=lambda x: x[0])
+
+        if not all_labels:
+            self.error.emit(
+                "No labels found in Audacity.\n"
+                "Place labels manually in Audacity then click Import Labels."
+            )
+            return
+
+        # Derive tracks from existing labels
+        def_artist = sec.get("default_artist", "")
+        def_album  = sec.get("default_album",  "")
+        def_aa     = sec.get("default_album_artist", "")
+        def_genre  = sec.get("default_genre",  "")
+
+        gap_labels     = [l for l in all_labels
+                          if re.search(r'silen', l[2], re.I) or not l[2].strip()]
+        content_labels = [l for l in all_labels if l not in gap_labels]
+        new_tracks: list[TrackMeta] = []
+
+        if gap_labels:
+            if project_end == 0.0:
+                project_end = gap_labels[-1][1] + 30.0
+            intervals: list[tuple[float, float]] = []
+            cursor = 0.0
+            for g_start, g_end, _ in sorted(gap_labels, key=lambda x: x[0]):
+                if g_start > cursor + 0.5:
+                    intervals.append((cursor, g_start))
+                cursor = g_end
+            if cursor < project_end - 0.5:
+                intervals.append((cursor, project_end))
+            for i, (s, e) in enumerate(intervals):
+                new_tracks.append(TrackMeta(
+                    index=i + 1, start=s, end=e,
+                    track_number=str(i + 1),
+                    artist=def_artist, album=def_album,
+                    album_artist=def_aa, genre=def_genre,
+                ))
+        else:
+            for i, (s, e, txt) in enumerate(content_labels):
+                new_tracks.append(TrackMeta(
+                    index=i + 1, start=s, end=e,
+                    title=txt or f"Track {i + 1}",
+                    track_number=str(i + 1),
+                    artist=def_artist, album=def_album,
+                    album_artist=def_aa, genre=def_genre,
+                ))
+
+        if not new_tracks:
+            self.error.emit("No track regions could be derived from the labels.")
+            return
+
+        self.log.emit(f"Found {len(new_tracks)} track region(s).")
+        self.tracks_ready.emit(new_tracks)
+
+    def _derive_tracks_from_silences(
+        self,
+        silence_regions: list[tuple[float, float]],
+        sec,
+        project_end: float = 0.0,
+    ) -> None:
+        """Convert silence regions directly into TrackMeta objects and emit
+        tracks_ready.  project_end is the known recording duration in seconds;
+        if 0 it is estimated from the last silence region."""
+        def_artist = sec.get("default_artist", "")
+        def_album  = sec.get("default_album",  "")
+        def_aa     = sec.get("default_album_artist", "")
+        def_genre  = sec.get("default_genre",  "")
+
+        if project_end == 0.0 and silence_regions:
+            project_end = silence_regions[-1][1] + 30.0
+
+        intervals: list[tuple[float, float]] = []
+        cursor = 0.0
+        for g_start, g_end in sorted(silence_regions):
+            if g_start > cursor + 0.5:
+                intervals.append((cursor, g_start))
+            cursor = g_end
+        if cursor < project_end - 0.5:
+            intervals.append((cursor, project_end))
+
+        new_tracks = [
+            TrackMeta(
+                index=i + 1, start=s, end=e,
+                track_number=str(i + 1),
+                artist=def_artist, album=def_album,
+                album_artist=def_aa, genre=def_genre,
+            )
+            for i, (s, e) in enumerate(intervals)
+        ]
+
+        if not new_tracks:
+            self.error.emit("No track regions derived from silence scan.")
+            return
+
+        self.log.emit(f"  Derived {len(new_tracks)} track(s) from Python silence scan.")
+        self.tracks_ready.emit(new_tracks)
+
 
 class FingerprintWorker(QThread):
     log       = pyqtSignal(str)
@@ -1025,6 +1826,25 @@ class SettingsDialog(QDialog):
             def_f.addRow(label + ":", le)
             self._fields[key] = le
 
+        # Audio file path — used by Python silence scanner when Audacity
+        # does not return the path via GetInfo:Tracks
+        af_le  = QLineEdit(sec.get("audio_file", ""))
+        af_btn = QPushButton("…")
+        af_btn.setFixedWidth(36)
+        af_btn.clicked.connect(lambda: af_le.setText(
+            QFileDialog.getOpenFileName(
+                self, "Select Audio File", af_le.text(),
+                "Audio Files (*.wav *.flac *.aif *.aiff *.mp3 *.ogg)"
+            )[0] or af_le.text()
+        ))
+        af_row = QWidget()
+        af_l   = QHBoxLayout(af_row)
+        af_l.setContentsMargins(0, 0, 0, 0)
+        af_l.addWidget(af_le)
+        af_l.addWidget(af_btn)
+        def_f.addRow("Audio File:", af_row)
+        self._fields["audio_file"] = af_le
+
         tabs.addTab(def_w, "Defaults")
 
         # ── buttons ───────────────────────────────────────────────────────
@@ -1204,6 +2024,8 @@ class MainWindow(QMainWindow):
         self.tracks: list[TrackMeta] = []
         self._model: Optional[TrackTableModel] = None
         self._worker: Optional[QThread] = None
+        self._heartbeat: Optional[QTimer] = None
+        self._audacity_info: str = ""          # version string after verify
 
         if HAS_MB:
             mb.set_useragent("VinylRipper", "1.0",
@@ -1238,6 +2060,8 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         _act("🔍\nFingerprint All","Fingerprint all tracks via AcoustID",       self._fingerprint_all)
         _act("💾\nExport All",     "Export and tag all tracks",                 self._export_all)
+        tb.addSeparator()
+        _act("🩺\nDiagnostics",    "Test pipe round-trip and show Audacity info", self._run_diagnostics)
         tb.addSeparator()
 
         spacer = QWidget()
@@ -1355,111 +2179,178 @@ class MainWindow(QMainWindow):
 
     # ── connection ────────────────────────────────────────────────────────
     def _connect(self) -> None:
-        if self.pipe.connect():
-            self._conn_lbl.setText("  ⬤  Connected  ")
-            self._conn_lbl.setObjectName("conn_on")
-            self._conn_lbl.setStyle(self._conn_lbl.style())  # force re-polish
-            self._log("✓ Connected to Audacity via mod-script-pipe.")
+        # If already connected, cleanly disconnect first
+        if self.pipe.connected:
+            self._log("Reconnecting — closing existing pipe handles…")
+            if self._heartbeat:
+                self._heartbeat.stop()
+            self.pipe.disconnect()
+            self._conn_lbl.setText("  ⬤  Disconnected  ")
+            self._conn_lbl.setObjectName("conn_off")
+            self._conn_lbl.setStyle(self._conn_lbl.style())
+
+        self._log("Opening pipe to Audacity…")
+        ok, msg = self.pipe.connect()
+        if ok:
+            self._conn_lbl.setText("  ⬤  Verifying…  ")
+            self._conn_lbl.setObjectName("conn_off")
+            self._conn_lbl.setStyle(self._conn_lbl.style())
+            self._log("Pipe opened — verifying Audacity round-trip…")
+            self._start_verify()
         else:
+            self._log(f"⚠  Connect failed: {msg.splitlines()[0]}")
             QMessageBox.critical(
-                self, "Connection Failed",
-                "Cannot connect to Audacity.\n\n"
-                "Ensure Audacity is running and mod-script-pipe is enabled:\n"
-                "  Edit → Preferences → Modules → mod-script-pipe → Enabled\n"
-                "Then restart Audacity."
+                self, "Connection Failed", msg
             )
+
+    def _start_verify(self) -> None:
+        worker = ConnectVerifyWorker(self.pipe)
+        worker.log.connect(self._log)
+        worker.ok.connect(self._on_verify_ok)
+        worker.failed.connect(self._on_verify_failed)
+        # keep reference so it isn't GC'd
+        self._verify_worker = worker
+        worker.start()
+
+    def _on_verify_ok(self, info: str) -> None:
+        self._audacity_info = info
+        self._conn_lbl.setText(f"  ⬤  {info}  ")
+        self._conn_lbl.setObjectName("conn_on")
+        self._conn_lbl.setStyle(self._conn_lbl.style())
+        self._log(f"✓ Connected — {info}")
+        self._start_heartbeat()
+
+    def _on_verify_failed(self, msg: str) -> None:
+        self._conn_lbl.setText("  ⬤  Pipe error  ")
+        self._conn_lbl.setObjectName("conn_off")
+        self._conn_lbl.setStyle(self._conn_lbl.style())
+        self._log(f"⚠  Verification failed: {msg.splitlines()[0]}")
+        QMessageBox.critical(self, "Connection Problem", msg)
+
+    # ── heartbeat ─────────────────────────────────────────────────────────
+    def _start_heartbeat(self) -> None:
+        """Ping Audacity every 10 s from a QTimer → daemon thread.
+        Keeps the connection indicator accurate and surfaces stalls early."""
+        if self._heartbeat:
+            self._heartbeat.stop()
+        self._heartbeat = QTimer(self)
+        self._heartbeat.setInterval(30_000)   # 30 seconds
+        self._heartbeat.timeout.connect(self._do_heartbeat)
+        self._heartbeat.start()
+
+    def _do_heartbeat(self) -> None:
+        """Fire-and-forget: run a ping in a daemon thread so the timer
+        callback (main thread) returns immediately."""
+        if not self.pipe.connected:
+            self._heartbeat.stop()
+            return
+        # skip if a heavy worker is already holding the pipe
+        if self._worker and self._worker.isRunning():
+            return
+
+        def _ping() -> None:
+            ok, resp = self.pipe.ping()
+            if ok:
+                try:
+                    tracks = json.loads(resp)
+                    n = len(tracks)
+                    info = f"{self._audacity_info}  ·  {n} track(s)"
+                except Exception:
+                    info = self._audacity_info
+                # Qt objects can only be touched from main thread — use a
+                # zero-duration singleShot to marshal back safely
+                QTimer.singleShot(0, lambda i=info: self._on_heartbeat_ok(i))
+            else:
+                QTimer.singleShot(0, lambda r=resp: self._on_heartbeat_fail(r))
+
+        t = threading.Thread(target=_ping, daemon=True)
+        t.start()
+
+    def _on_heartbeat_ok(self, info: str) -> None:
+        self._conn_lbl.setText(f"  ⬤  {info}  ")
+        self._conn_lbl.setObjectName("conn_on")
+        self._conn_lbl.setStyle(self._conn_lbl.style())
+
+    def _on_heartbeat_fail(self, reason: str) -> None:
+        self._conn_lbl.setText("  ⬤  No response  ")
+        self._conn_lbl.setObjectName("conn_off")
+        self._conn_lbl.setStyle(self._conn_lbl.style())
+        self._log(f"⚠  Heartbeat failed ({reason}) — is Audacity still running?")
+        # If the pipe files have disappeared Audacity has quit; mark disconnected
+        # so the user gets a clear prompt rather than more timeout errors.
+        ok, _ = AudacityPipe.check_pipes()
+        if not ok:
+            self.pipe.disconnect()
+            self._heartbeat.stop()
+            self._conn_lbl.setText("  ⬤  Disconnected  ")
+            self._conn_lbl.setStyle(self._conn_lbl.style())
+            self._log("Pipe files gone — Audacity has exited. Click Connect to reconnect.")
+
+    # ── diagnostics (manual) ──────────────────────────────────────────────
+    def _run_diagnostics(self) -> None:
+        """Manual diagnostics: dump pipe state and re-run round-trip verify."""
+        self._log("─" * 60)
+        self._log("🩺  Diagnostics")
+        self._log(f"   Platform      : {sys.platform}")
+        self._log(f"   Pipe → Audacity : {_TOFILE}")
+        self._log(f"   Pipe ← Audacity : {_FROMFILE}")
+        self._log(f"   pipe.connected  : {self.pipe.connected}")
+
+        if sys.platform != "win32":
+            import stat as _stat
+            for label, path in [("→", _TOFILE), ("←", _FROMFILE)]:
+                p = Path(path)
+                if p.exists():
+                    mode = p.stat().st_mode
+                    kind = "FIFO ✓" if _stat.S_ISFIFO(mode) else "REGULAR FILE ✗"
+                    self._log(f"   {label} {path}: {kind}")
+                else:
+                    self._log(f"   {label} {path}: MISSING ✗")
+
+        pipe_ok, pipe_msg = AudacityPipe.check_pipes()
+        self._log(f"   Pipe check: {'OK' if pipe_ok else '✗ ' + pipe_msg.splitlines()[0]}")
+
+        if not self.pipe.connected:
+            self._log("   Not connected — click Connect first for a round-trip test.")
+            return
+        self._start_verify()
 
     # ── silence detection ─────────────────────────────────────────────────
     def _detect_silence(self) -> None:
         if not self.pipe.connected:
             QMessageBox.warning(self, "Not Connected", "Connect to Audacity first.")
             return
-        sec = self.cfg["vinyl_ripper"]
-        thresh  = float(sec.get("silence_threshold_db", "-40"))
-        min_dur = float(sec.get("silence_min_duration", "1.5"))
-        self._log(f"Running silence detection (threshold={thresh} dB, min={min_dur}s)…")
-        self.pipe.add_silence_labels(thresh, min_dur)
-        time.sleep(1.0)
-        self._import_labels()
+        self._run_silence_worker(run_detect=True)
 
     # ── label import ──────────────────────────────────────────────────────
     def _import_labels(self) -> None:
         if not self.pipe.connected:
             QMessageBox.warning(self, "Not Connected", "Connect to Audacity first.")
             return
-        raw = self.pipe.send("GetInfo: Type=Labels Format=JSON")
-        try:
-            label_data = json.loads(raw)
-        except Exception:
-            self._log("No label data returned from Audacity.")
+        self._run_silence_worker(run_detect=False)
+
+    def _run_silence_worker(self, run_detect: bool) -> None:
+        """Spin up a SilenceWorker so pipe I/O never blocks the main thread."""
+        if self._worker and self._worker.isRunning():
+            QMessageBox.warning(self, "Busy", "A background task is already running.")
             return
+        worker = SilenceWorker(self.pipe, self.cfg, run_detect=run_detect)
+        worker.log.connect(self._log)
+        worker.error.connect(self._on_silence_error)
+        worker.tracks_ready.connect(self._on_tracks_ready)
+        worker.finished.connect(self._on_worker_done)
+        self._worker = worker
+        self._progress.setVisible(True)
+        self._progress.setRange(0, 0)   # indeterminate spinner
+        self._log("Starting silence worker…")
+        worker.start()
 
-        all_labels: list[tuple[float, float, str]] = []
-        for entry in label_data:
-            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                for lbl in entry[1]:
-                    all_labels.append((float(lbl[0]), float(lbl[1]), str(lbl[2])))
-        all_labels.sort(key=lambda x: x[0])
+    def _on_silence_error(self, msg: str) -> None:
+        self._progress.setVisible(False)
+        self._log(f"⚠  {msg}")
+        QMessageBox.warning(self, "Silence Detection", msg)
 
-        if not all_labels:
-            self._log("No labels found. Run silence detection first.")
-            return
-
-        sec = self.cfg["vinyl_ripper"]
-        def_artist = sec.get("default_artist", "")
-        def_album  = sec.get("default_album", "")
-        def_aa     = sec.get("default_album_artist", "")
-        def_genre  = sec.get("default_genre", "")
-
-        gap_labels = [l for l in all_labels
-                      if re.search(r'silen', l[2], re.I) or not l[2].strip()]
-        content_labels = [l for l in all_labels if l not in gap_labels]
-
-        new_tracks: list[TrackMeta] = []
-
-        if gap_labels:
-            # derive content windows between silences
-            dur_raw = self.pipe.send("GetInfo: Type=Clips Format=JSON")
-            project_end = 0.0
-            try:
-                clips = json.loads(dur_raw)
-                for c in clips:
-                    project_end = max(project_end, float(c.get("end", 0)))
-            except Exception:
-                pass
-            if project_end == 0.0:
-                project_end = gap_labels[-1][1] + 30.0
-
-            intervals: list[tuple[float, float]] = []
-            cursor = 0.0
-            for g_start, g_end, _ in sorted(gap_labels, key=lambda x: x[0]):
-                if g_start > cursor + 0.5:
-                    intervals.append((cursor, g_start))
-                cursor = g_end
-            if cursor < project_end - 0.5:
-                intervals.append((cursor, project_end))
-
-            for i, (s, e) in enumerate(intervals):
-                new_tracks.append(TrackMeta(
-                    index=i + 1, start=s, end=e,
-                    track_number=str(i + 1),
-                    artist=def_artist, album=def_album,
-                    album_artist=def_aa, genre=def_genre,
-                ))
-        else:
-            for i, (s, e, txt) in enumerate(content_labels):
-                new_tracks.append(TrackMeta(
-                    index=i + 1, start=s, end=e,
-                    title=txt or f"Track {i+1}",
-                    track_number=str(i + 1),
-                    artist=def_artist, album=def_album,
-                    album_artist=def_aa, genre=def_genre,
-                ))
-
-        if not new_tracks:
-            self._log("No tracks derived from labels.")
-            return
-
+    def _on_tracks_ready(self, new_tracks: list) -> None:
         self.tracks.clear()
         self.tracks.extend(new_tracks)
         self._model.refresh_all()
@@ -1603,6 +2494,9 @@ class MainWindow(QMainWindow):
         self._progress.setValue(done)
 
     def _on_worker_done(self) -> None:
+        # Reset progress bar to determinate mode (in case silence worker left
+        # it as an indeterminate spinner) then hide it.
+        self._progress.setRange(0, 1)
         self._progress.setVisible(False)
         self._model.refresh_all()
         self._log("Done.")
@@ -1647,6 +2541,21 @@ class MainWindow(QMainWindow):
             self._log(f"  Discogs: album_artist={t.album_artist} genre={t.genre}")
         else:
             self._log("  No Discogs result found.")
+
+    # ── window lifecycle ──────────────────────────────────────────────────
+    def closeEvent(self, event) -> None:
+        """Release pipe handles cleanly so Audacity can reuse them.
+
+        We deliberately do NOT delete the FIFO files — they belong to
+        Audacity and it will reuse or recreate them on next startup.
+        """
+        if self._heartbeat:
+            self._heartbeat.stop()
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(2000)
+        self.pipe.disconnect()
+        event.accept()
 
     # ── settings ──────────────────────────────────────────────────────────
     def _open_settings(self) -> None:

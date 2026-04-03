@@ -1,0 +1,86 @@
+Platform : linux
+Pipe  →  : /tmp/audacity_script_pipe.to.1000
+Pipe  ←  : /tmp/audacity_script_pipe.from.1000
+  → /tmp/audacity_script_pipe.to.1000: FIFO ✓
+  ← /tmp/audacity_script_pipe.from.1000: FIFO ✓
+
+Opening pipes...
+Pipes open.
+
+============================================================
+
+>>> Version:
+!!! TimeoutError: No response within 15.0s — is Audacity focused / is a project open?
+
+>>> GetInfo: Type=Tracks Format=JSON
+<<< 'BatchCommand finished: Failed! Your batch command of Raise was not recognized. BatchCommand finished: Failed! [    { "name":"Red Exposure", "focused":1, "selected":1, "kind":"wave", "start":0, "end":2040.99, "pan":0, "volume":1, "channels":2, "solo":0, "mute":0, "VZoomMin":-1, "VZoomMax":1 } ]'
+
+============================================================
+Fetching full command list (may take a few seconds)...
+
+>>> GetInfo: Commands
+<<< 'Your batch command of Raise was not recognized. BatchCommand finished: Failed! [    { "id":"Amplify", "name":"Amplify", "params":       [          { "key":"Ratio", "type":"double", "default":0.9 },         { "key":"AllowClipping", "type":"bool", "default":"False" } ], "url":"Amplify",      "tip":"Increases or decreases the volume of the audio you have selected" },   { "id":"AutoDuck", "name":"Auto'
+  Parse error: Expecting value: line 1 column 1 (char 0)
+  Raw: Your batch command of Raise was not recognized.
+BatchCommand finished: Failed!
+[ 
+  { "id":"Amplify", "name":"Amplify", "params":
+      [ 
+        { "key":"Ratio", "type":"double", "default":0.9 },
+        { "key":"AllowClipping", "type":"bool", "default":"False" } ], "url":"Amplify", 
+    "tip":"In
+
+============================================================
+Probing candidate SilenceFind command names via Help:...
+
+>>> Help: SilenceFind
+<<< 'Your batch command of Raise was not recognized. BatchCommand finished: Failed! { "id":"Help", "name":"Help", "params":     [        { "key":"Command", "type":"string", "default":"Help" },       { "key":"Format", "type":"enum", "default":"JSON", "enum":           [ "JSON", "LISP", "Brief" ] } ],    "url":"Extra_Menu:_Scriptables_II#help",    "tip":"Gives help on a command." }'
+  *** FOUND: SilenceFind
+      Your batch command of Raise was not recognized.
+BatchCommand finished: Failed!
+{ "id":"Help", "name":"Help", "params":
+    [ 
+      { "key":"Command", "type":"string", "default":"Help" },
+      { "key":"Format", "type":"enum", "default":"JSON", "enum":
+          [ "JSON", "LISP", "Brief" ] } ], 
+  "
+
+>>> Help: SilenceFinder
+<<< 'Your batch command of Raise was not recognized. BatchCommand finished: Failed! { "id":"Help", "name":"Help", "params":     [        { "key":"Command", "type":"string", "default":"Help" },       { "key":"Format", "type":"enum", "default":"JSON", "enum":           [ "JSON", "LISP", "Brief" ] } ],    "url":"Extra_Menu:_Scriptables_II#help",    "tip":"Gives help on a command." }'
+  *** FOUND: SilenceFinder
+      Your batch command of Raise was not recognized.
+BatchCommand finished: Failed!
+{ "id":"Help", "name":"Help", "params":
+    [ 
+      { "key":"Command", "type":"string", "default":"Help" },
+      { "key":"Format", "type":"enum", "default":"JSON", "enum":
+          [ "JSON", "LISP", "Brief" ] } ], 
+  "
+
+>>> Help: FindSilences
+<<< 'Your batch command of Raise was not recognized. BatchCommand finished: Failed! { "id":"Help", "name":"Help", "params":     [        { "key":"Command", "type":"string", "default":"Help" },       { "key":"Format", "type":"enum", "default":"JSON", "enum":           [ "JSON", "LISP", "Brief" ] } ],    "url":"Extra_Menu:_Scriptables_II#help",    "tip":"Gives help on a command." }'
+  *** FOUND: FindSilences
+      Your batch command of Raise was not recognized.
+BatchCommand finished: Failed!
+{ "id":"Help", "name":"Help", "params":
+    [ 
+      { "key":"Command", "type":"string", "default":"Help" },
+      { "key":"Format", "type":"enum", "default":"JSON", "enum":
+          [ "JSON", "LISP", "Brief" ] } ], 
+  "
+
+>>> Help: AnalyzeSilence
+!!! TimeoutError: No response within 10.0s — is Audacity focused / is a project open?
+
+>>> Help: DetectSilence
+!!! TimeoutError: No response within 10.0s — is Audacity focused / is a project open?
+
+============================================================
+Scanning menus for silence/analyze items...
+
+>>> GetInfo: Menus
+<<< 'BatchCommand finished: Failed! h":2, "flags":0,      "label":"Cursor to Track End", "accel":"Shift+K",      "id":"SelCursorToTrackEnd" },   { "depth":2, "flags":0,      "label":"Track Start to End", "accel":"",      "id":"SelTrackStartToEnd" },   { "depth":2, "flags":0, "label":"----", "accel":"" },   { "depth":2, "flags":0,      "label":"Store Selection", "accel":"", "id":"SelSave" },   { "depth"'
+  Parse error: Expecting value: line 1 column 1 (char 0)
+
+============================================================
+Probe complete. Paste the full output here for analysis.

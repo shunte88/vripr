@@ -31,7 +31,7 @@ dependencies = [
     "PyQt6>=6.6.0",
     "pyacoustid>=1.3.0",
     "musicbrainzngs>=0.7.1",
-    "discogs-client>=2.4.0",
+    "discogs-client>=2.3.0",
     "mutagen>=1.47.0",
     "requests>=2.31.0",
 ]
@@ -61,8 +61,9 @@ packages = ["src/vripr"]
 
 # ── uv tool config ────────────────────────────────────────────────────────────
 [tool.uv]
-dev-dependencies = [
-    "pytest>=8.0",
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
     "pytest-qt>=4.4",
     "ruff>=0.4",
     "mypy>=1.9",
@@ -93,3 +94,26 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts   = "-v --tb=short"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
