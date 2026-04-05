@@ -33,7 +33,9 @@ impl TrackMeta {
             let s = secs as u64;
             format!("{}:{:02}", s / 60, s % 60)
         };
-        format!("{}–{}", fmt(self.start), fmt(self.end))
+        let dur = self.end - self.start;
+        let d = dur as u64;
+        format!("{}–{} ({}:{:02})", fmt(self.start), fmt(self.end), d / 60, d % 60)
     }
 
     pub fn status_icon(&self) -> &'static str {

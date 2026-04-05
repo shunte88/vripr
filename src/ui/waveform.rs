@@ -21,10 +21,14 @@ pub struct WaveformEvent {
     pub toggle_pin: Option<usize>,
     /// Current active selection in seconds, or None if cleared.
     pub selection: Option<(f64, f64)>,
-    /// Space was pressed — toggle playback.
-    pub playback_toggle: bool,
-    /// P was pressed at this time — caller should set boundary.
-    pub pin_at: Option<f64>,
+    /// Play this (start, end) region via Audacity.
+    pub play_region: Option<(f64, f64)>,
+    /// Stop playback.
+    pub stop_playback: bool,
+    /// Set track vi's start time to this value.
+    pub pin_start: Option<(usize, f64)>,
+    /// Set track vi's end time to this value.
+    pub pin_end: Option<(usize, f64)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,9 +51,9 @@ const TRACK_COLORS: &[(u8, u8, u8)] = &[
 /// Render the waveform panel and handle all interaction.
 ///
 /// `track_bounds` is `(display_index, start_secs, end_secs, pinned)`.
-/// `drag`      — persistent drag state across frames.
-/// `selection` — persistent selection band (seconds) across frames.
-/// `zoom`      — None = full view; Some(start, end) = 20s zoomed view.
+/// `drag`       — persistent drag state across frames.
+/// `selection`  — persistent selection band (seconds) across frames.
+/// `is_playing` — show playing indicator in header.
 pub fn show_waveform(
     ctx: &egui::Context,
     samples: &[f32],
@@ -57,7 +61,6 @@ pub fn show_waveform(
     track_bounds: &[(usize, f64, f64, bool)],
     drag: &mut Option<WaveformDragState>,
     selection: &mut Option<(f64, f64)>,
-    zoom: &mut Option<(f64, f64)>,
     is_playing: bool,
 ) -> WaveformEvent {
     if duration_secs <= 0.0 { return WaveformEvent::default(); }
@@ -80,15 +83,11 @@ pub fn show_waveform(
                         .size(11.0),
                 );
 
-                if let Some((zs, ze)) = *zoom {
+                if is_playing {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "  🔍 {} – {}  |  {} to play  |  P = pin boundary  |  Esc = zoom out",
-                            fmt_time(zs), fmt_time(ze),
-                            if is_playing { "⏹ Space" } else { "▶ Space" }
-                        ))
-                        .color(Color32::from_rgb(148, 226, 213))
-                        .size(11.0),
+                        egui::RichText::new("  ▶ Playing…  right-click → Stop")
+                            .color(Color32::from_rgb(166, 227, 161))
+                            .size(11.0),
                     );
                 } else if let Some((s, e)) = *selection {
                     let dur = e - s;
@@ -102,24 +101,16 @@ pub fn show_waveform(
                     );
                 } else {
                     ui.label(
-                        egui::RichText::new("  drag boundary to adjust  |  double-click to zoom 20s  |  right-click track to pin/unpin")
-                            .color(Color32::from_rgb(108, 112, 134))
-                            .size(10.0),
+                        egui::RichText::new(
+                            "  drag boundary to adjust  |  drag empty area to select  |  right-click for playback & pin options"
+                        )
+                        .color(Color32::from_rgb(108, 112, 134))
+                        .size(10.0),
                     );
                 }
 
-                // Esc: clear zoom (and selection)
                 if ui.input(|i| i.key_pressed(Key::Escape)) {
-                    if zoom.is_some() {
-                        *zoom = None;
-                    } else {
-                        *selection = None;
-                    }
-                }
-
-                // Space: toggle playback (only when zoomed)
-                if zoom.is_some() && ui.input(|i| i.key_pressed(Key::Space)) {
-                    event.playback_toggle = true;
+                    *selection = None;
                 }
             });
 
@@ -130,24 +121,14 @@ pub fn show_waveform(
             let rect = resp.rect;
             if rect.width() < 4.0 { return; }
 
-            // View window — either zoomed or full
-            let (view_start, view_end) = zoom.unwrap_or((0.0, duration_secs));
-            let view_dur = (view_end - view_start).max(0.001);
-
             let time_to_x = |t: f64| -> f32 {
-                rect.left() + ((t - view_start) / view_dur).clamp(0.0, 1.0) as f32 * rect.width()
+                rect.left() + (t / duration_secs).clamp(0.0, 1.0) as f32 * rect.width()
             };
             let x_to_time = |x: f32| -> f64 {
-                view_start + ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * view_dur
+                ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * duration_secs
             };
 
-            // Slice samples to the visible window
-            let n = samples.len();
-            let i_start = ((view_start / duration_secs) * n as f64) as usize;
-            let i_end   = ((view_end   / duration_secs) * n as f64).ceil() as usize;
-            let visible_samples = &samples[i_start.min(n)..i_end.min(n)];
-
-            draw_waveform(&painter, rect, visible_samples);
+            draw_waveform(&painter, rect, samples);
             draw_track_regions(&painter, rect, track_bounds, time_to_x);
 
             // Draw selection band
@@ -169,19 +150,19 @@ pub fn show_waveform(
                 );
             }
 
-            // Playing indicator bar at top
+            // Playing indicator bar at top of waveform area
             if is_playing {
                 painter.rect_filled(
-                    Rect::from_min_max(Pos2::new(rect.left(), rect.top()), Pos2::new(rect.right(), rect.top() + 3.0)),
+                    Rect::from_min_max(
+                        Pos2::new(rect.left(), rect.top()),
+                        Pos2::new(rect.right(), rect.top() + 3.0),
+                    ),
                     0.0,
                     Color32::from_rgb(166, 227, 161),
                 );
             }
 
             const SNAP_PX: f32 = 8.0;
-
-            // Current hover time (used for P key)
-            let hover_time = resp.hover_pos().map(|hp| x_to_time(hp.x));
 
             // --- Hover: time label + boundary highlight ---
             if let Some(hp) = resp.hover_pos() {
@@ -215,57 +196,71 @@ pub fn show_waveform(
                         }
                     }
                 }
-
-                // P key: pin boundary at hover position (zoom mode only)
-                if zoom.is_some() && ui.input(|i| i.key_pressed(Key::P)) {
-                    event.pin_at = Some(t);
-                }
             }
 
-            // P key fallback when no hover (shouldn't normally happen)
-            if event.pin_at.is_none() && zoom.is_some() && ui.input(|i| i.key_pressed(Key::P)) {
-                if let Some(t) = hover_time {
-                    event.pin_at = Some(t);
-                }
-            }
-
-            // --- Context menu: right-click on track region to pin/unpin ---
+            // --- Context menu ---
             resp.context_menu(|ui| {
-                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                    let click_t = x_to_time(pos.x);
-                    let hit = track_bounds.iter().enumerate().find(|(_, &(_, ts, te, _))| {
-                        click_t >= ts && click_t <= te
-                    });
-                    if let Some((vi, &(tidx, _, _, pinned))) = hit {
-                        let label = if pinned {
-                            format!("📌 Unpin Track {}", tidx)
-                        } else {
-                            format!("📌 Pin Track {}", tidx)
-                        };
-                        if ui.button(label).clicked() {
-                            event.toggle_pin = Some(vi);
+                let click_pos = ui.input(|i| i.pointer.interact_pos());
+                let click_t   = click_pos.map(|p| x_to_time(p.x));
+
+                // Stop playback (shown first when playing)
+                if is_playing {
+                    if ui.button("⏹ Stop playback").clicked() {
+                        event.stop_playback = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                }
+
+                // Find which track was right-clicked
+                let hit = click_t.and_then(|t| {
+                    track_bounds.iter().enumerate().find(|(_, &(_, ts, te, _))| {
+                        t >= ts && t <= te
+                    })
+                });
+
+                if let Some((vi, &(tidx, ts, te, pinned))) = hit {
+                    // Play
+                    if !is_playing {
+                        if ui.button(format!("▶ Play Track {}", tidx)).clicked() {
+                            event.play_region = Some((ts, te));
                             ui.close_menu();
                         }
-                    } else {
-                        ui.label("Right-click a track region to pin/unpin");
                     }
+
+                    // Pin start / end at click position
+                    if let Some(t) = click_t {
+                        if t > ts && t < te {
+                            if ui.button(format!("↦ Pin start of T{} here  ({})", tidx, fmt_time(t))).clicked() {
+                                event.pin_start = Some((vi, t));
+                                ui.close_menu();
+                            }
+                            if ui.button(format!("↤ Pin end of T{} here  ({})", tidx, fmt_time(t))).clicked() {
+                                event.pin_end = Some((vi, t));
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                        }
+                    }
+
+                    // Pin/unpin boundary toggle
+                    let pin_label = if pinned {
+                        format!("📌 Unpin Track {}", tidx)
+                    } else {
+                        format!("📌 Pin Track {}", tidx)
+                    };
+                    if ui.button(pin_label).clicked() {
+                        event.toggle_pin = Some(vi);
+                        ui.close_menu();
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new("Right-click a track region for options")
+                            .color(Color32::from_rgb(108, 112, 134))
+                            .size(10.0),
+                    );
                 }
             });
-
-            // --- Double-click: zoom in / zoom out ---
-            if resp.double_clicked() {
-                if zoom.is_some() {
-                    // Second double-click zooms out
-                    *zoom = None;
-                } else if let Some(pos) = resp.interact_pointer_pos() {
-                    let center = x_to_time(pos.x);
-                    let z_start = (center - 10.0).max(0.0);
-                    let z_end   = (center + 10.0).min(duration_secs);
-                    *zoom = Some((z_start, z_end));
-                    // Clear any selection when zooming
-                    *selection = None;
-                }
-            }
 
             // --- Drag start: boundary grab or selection start ---
             if resp.drag_started() {
@@ -300,7 +295,7 @@ pub fn show_waveform(
                                 event.drag_update = Some((*track_vi, *is_start, x_to_time(pos.x)));
                             }
                             WaveformDragState::Selecting { anchor_secs } => {
-                                let cur = x_to_time(pos.x);
+                                let cur    = x_to_time(pos.x);
                                 let anchor = *anchor_secs;
                                 let s = anchor.min(cur);
                                 let e = anchor.max(cur);
@@ -332,19 +327,74 @@ fn draw_waveform(painter: &Painter, rect: Rect, samples: &[f32]) {
     let bar_w = (rect.width() / n as f32).max(0.5);
     let cy    = rect.center().y;
     let max_h = rect.height() * 0.45;
-    let color = Color32::from_rgba_premultiplied(148, 226, 213, 100);
+
     for (i, &amp) in samples.iter().enumerate() {
         let x = rect.left() + i as f32 * bar_w;
         let h = (amp * max_h).max(1.0);
+
+        // Body bar: amplitude-gradient colour (teal → green → yellow → red).
+        let body_color = amplitude_color(amp, 110);
         painter.rect_filled(
             Rect::from_min_max(
                 Pos2::new(x, cy - h),
                 Pos2::new((x + bar_w - 0.5).max(x + 0.5), cy + h),
             ),
             0.0,
-            color,
+            body_color,
+        );
+
+        // Bright peak cap at the very tip of each bar.
+        let cap_h = (h * 0.12).max(1.5).min(4.0);
+        let peak_color = amplitude_color(amp, 210);
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(x, cy - h),
+                Pos2::new((x + bar_w - 0.5).max(x + 0.5), cy - h + cap_h),
+            ),
+            0.0,
+            peak_color,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(x, cy + h - cap_h),
+                Pos2::new((x + bar_w - 0.5).max(x + 0.5), cy + h),
+            ),
+            0.0,
+            peak_color,
         );
     }
+}
+
+/// Map amplitude [0..1] to a Catppuccin-palette gradient colour.
+/// `alpha` is the premultiplied alpha to use.
+fn amplitude_color(amp: f32, alpha: u8) -> Color32 {
+    let t = amp.clamp(0.0, 1.0);
+    let (r, g, b) = if t < 0.40 {
+        // teal → green
+        let s = t / 0.40;
+        (lerp(148, 166, s), lerp(226, 227, s), lerp(213, 161, s))
+    } else if t < 0.72 {
+        // green → yellow (Catppuccin yellow)
+        let s = (t - 0.40) / 0.32;
+        (lerp(166, 249, s), lerp(227, 226, s), lerp(161, 175, s))
+    } else {
+        // yellow → red (Catppuccin red)
+        let s = (t - 0.72) / 0.28;
+        (lerp(249, 243, s), lerp(226, 139, s), lerp(175, 168, s))
+    };
+    // Scale RGB by alpha fraction to produce premultiplied values.
+    let a = alpha as f32 / 255.0;
+    Color32::from_rgba_premultiplied(
+        (r as f32 * a) as u8,
+        (g as f32 * a) as u8,
+        (b as f32 * a) as u8,
+        alpha,
+    )
+}
+
+#[inline]
+fn lerp(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as u8
 }
 
 fn draw_track_regions(
@@ -386,11 +436,7 @@ fn draw_track_regions(
                 border.r(), border.g(), border.b(), 140,
             )),
         );
-        let label = if pinned {
-            format!("📌{}", tidx)
-        } else {
-            tidx.to_string()
-        };
+        let label = if pinned { format!("📌{}", tidx) } else { tidx.to_string() };
         if x1 - x0 > 18.0 {
             painter.text(
                 Pos2::new(x0 + 3.0, rect.top() + 3.0),

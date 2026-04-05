@@ -83,7 +83,6 @@ pub struct VriprApp {
     waveform_duration: f64,
     waveform_drag: Option<crate::ui::WaveformDragState>,
     waveform_selection: Option<(f64, f64)>, // active selection band in seconds
-    waveform_zoom: Option<(f64, f64)>,      // None = full view; Some(start,end) = zoomed 20s window
     /// When Some, Audacity is playing; holds the expected finish time for the indicator.
     play_end: Option<std::time::Instant>,
     /// Path to the WAV exported from Audacity on connect — used for detection.
@@ -156,7 +155,6 @@ impl VriprApp {
             waveform_duration: 0.0,
             waveform_drag: None,
             waveform_selection: None,
-            waveform_zoom: None,
             play_end: None,
             analysis_wav: None,
         }
@@ -825,18 +823,31 @@ impl VriprApp {
                     split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
                 } else {
                     let found = best_detected.len();
-                    if found != expected {
-                        let _ = tx.send(WorkerMessage::Log(format!(
-                            "  ⚠ count mismatch after retries: {} detected vs {} Discogs — \
-                             adjust threshold in Settings if needed",
-                            found, expected
-                        )));
-                    } else {
+                    let use_discogs_fallback = if found == expected {
                         let _ = tx.send(WorkerMessage::Log(format!(
                             "  ✓ {} track(s) matched Discogs count", found
                         )));
-                    }
+                        false
+                    } else if found > expected {
+                        let _ = tx.send(WorkerMessage::Log(format!(
+                            "  ⚠ {} detected vs {} expected — discarding {} extra region(s)",
+                            found, expected, found - expected
+                        )));
+                        best_detected.truncate(expected);
+                        false
+                    } else {
+                        // Too few detected after all retries — Discogs durations are more reliable.
+                        let _ = tx.send(WorkerMessage::Log(format!(
+                            "  ⚠ only {} of {} tracks detected after all retries — \
+                             falling back to Discogs durations",
+                            found, expected
+                        )));
+                        true
+                    };
 
+                    if use_discogs_fallback {
+                        split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
+                    } else {
                     // Pair detected regions with Discogs metadata in order.
                     best_detected.iter().enumerate().map(|(i, dt)| {
                         let dr = disc_refs.get(i);
@@ -865,6 +876,7 @@ impl VriprApp {
                             ..Default::default()
                         }
                     }).collect()
+                    } // end else-not-fallback
                 }
             } else {
                 let _ = tx.send(WorkerMessage::Log(
@@ -1098,6 +1110,17 @@ impl VriprApp {
                 }
             }
 
+            // If we ended up with more tracks than expected, drop the extras from the tail
+            // (keep pinned tracks if possible — sort first so pinned ones rank by position).
+            if merged.len() > expected {
+                merged.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+                let _ = tx.send(WorkerMessage::Log(format!(
+                    "  ⚠ {} merged vs {} expected — discarding {} extra region(s)",
+                    merged.len(), expected, merged.len() - expected
+                )));
+                merged.truncate(expected);
+            }
+
             // Sort by start time and re-assign indices + track numbers
             merged.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
             for (i, t) in merged.iter_mut().enumerate() {
@@ -1164,7 +1187,6 @@ impl VriprApp {
         }
         let is_playing = self.play_end.is_some();
 
-        // Extract data before any borrows of self (avoids borrow conflicts)
         let wf_data = self.waveform_samples.as_ref().map(|s| {
             (s.clone(), self.waveform_duration, self.waveform_drag.clone())
         });
@@ -1174,19 +1196,16 @@ impl VriprApp {
             .map(|t| (t.index, t.start, t.end, t.pinned))
             .collect();
 
-        let mut sel  = self.waveform_selection;
-        let mut zoom = self.waveform_zoom;
+        let mut sel = self.waveform_selection;
 
         let evt = crate::ui::waveform::show_waveform(
-            ctx, &samples, duration, &track_bounds, &mut drag, &mut sel, &mut zoom, is_playing,
+            ctx, &samples, duration, &track_bounds, &mut drag, &mut sel, is_playing,
         );
 
-        // Write back persistent state
         self.waveform_drag      = drag;
         self.waveform_selection = sel;
-        self.waveform_zoom      = zoom;
 
-        // Handle pin toggle
+        // Pin toggle
         if let Some(vi) = evt.toggle_pin {
             if let Some(track) = self.tracks.get_mut(vi) {
                 track.pinned = !track.pinned;
@@ -1197,7 +1216,7 @@ impl VriprApp {
             }
         }
 
-        // Apply boundary drag
+        // Boundary drag
         if let Some((vi, is_start, new_time)) = evt.drag_update {
             if is_start {
                 if let Some(track) = self.tracks.get_mut(vi) {
@@ -1222,48 +1241,54 @@ impl VriprApp {
             }
         }
 
-        // P key: set end of the track to the left of pin_at; push next track start if needed
-        if let Some(t) = evt.pin_at {
-            // Stop playback when P is pressed
-            if self.play_end.is_some() {
-                if let Ok(mut pipe) = self.pipe.lock() {
-                    let _ = pipe.stop_playback();
-                }
-                self.play_end = None;
-            }
-            // Find the track that contains t (or is immediately left of t)
-            let left_vi = self.tracks.iter().rposition(|tr| tr.start <= t);
-            if let Some(vi) = left_vi {
-                let min_end = self.tracks[vi].start + 0.5;
-                self.tracks[vi].end = t.max(min_end);
-                let new_end = self.tracks[vi].end;
-                // Push next track's start if it would overlap
-                if let Some(next) = self.tracks.get_mut(vi + 1) {
-                    if next.start < new_end + 1.0 {
-                        next.start = new_end + 1.0;
+        // Pin start (right-click menu)
+        if let Some((vi, t)) = evt.pin_start {
+            if let Some(track) = self.tracks.get_mut(vi) {
+                track.start = t.max(0.0).min(track.end - 0.5);
+                let new_start = track.start;
+                if vi > 0 {
+                    if let Some(prev) = self.tracks.get_mut(vi - 1) {
+                        prev.end = new_start;
                     }
                 }
                 self.log_messages.push(format!(
-                    "Track {} end → {} (P)", self.tracks[vi].index, fmt_secs(new_end)
+                    "Track {} start → {}", self.tracks[vi].index, fmt_secs(new_start)
                 ));
             }
         }
 
-        // Space: toggle Audacity playback for the current zoom window
-        if evt.playback_toggle {
-            if self.play_end.is_some() {
-                // Stop playback
-                if let Ok(mut pipe) = self.pipe.lock() {
-                    let _ = pipe.stop_playback();
+        // Pin end (right-click menu)
+        if let Some((vi, t)) = evt.pin_end {
+            if let Some(track) = self.tracks.get_mut(vi) {
+                track.end = t.max(track.start + 0.5);
+                let new_end = track.end;
+                if let Some(next) = self.tracks.get_mut(vi + 1) {
+                    if next.start < new_end {
+                        next.start = new_end + 1.0;
+                    }
                 }
-                self.play_end = None;
-            } else if self.pipe_connected {
-                let (start, end) = self.waveform_zoom.unwrap_or((0.0, duration));
+                self.log_messages.push(format!(
+                    "Track {} end → {}", self.tracks[vi].index, fmt_secs(new_end)
+                ));
+            }
+        }
+
+        // Stop playback (right-click menu)
+        if evt.stop_playback {
+            if let Ok(mut pipe) = self.pipe.lock() {
+                let _ = pipe.stop_playback();
+            }
+            self.play_end = None;
+        }
+
+        // Play region (right-click menu)
+        if let Some((start, end)) = evt.play_region {
+            if self.pipe_connected {
                 if let Ok(mut pipe) = self.pipe.lock() {
                     match pipe.play_region(start, end) {
                         Ok(_) => {
-                            let play_dur = std::time::Duration::from_secs_f64(end - start + 0.5);
-                            self.play_end = Some(std::time::Instant::now() + play_dur);
+                            let dur = std::time::Duration::from_secs_f64(end - start + 0.5);
+                            self.play_end = Some(std::time::Instant::now() + dur);
                         }
                         Err(e) => {
                             self.log_messages.push(format!("⚠ Playback failed: {e}"));
@@ -1408,82 +1433,104 @@ impl VriprApp {
                             .id_source("track_editor_scroll")
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
-                                egui::Grid::new("track_editor_grid")
-                                    .num_columns(2)
-                                    .spacing([4.0, 4.0])
-                                    .show(ui, |ui| {
-                                        let avail = ui.available_width() - 60.0;
+                                const LBL: f32 = 78.0;
+                                const SM:  f32 = 54.0;
+                                const GAP: f32 = 4.0;
 
-                                        ui.label("Title");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].title).desired_width(avail));
-                                        ui.end_row();
+                                macro_rules! field_row {
+                                    ($label:expr, $field:expr) => {{
+                                        ui.horizontal(|ui| {
+                                            ui.add_sized([LBL, 20.0], egui::Label::new($label));
+                                            let w = (ui.available_width() - GAP).max(40.0);
+                                            ui.add_sized([w, 20.0],
+                                                egui::TextEdit::singleline($field));
+                                        });
+                                    }};
+                                }
+                                macro_rules! small_row {
+                                    ($label:expr, $field:expr) => {{
+                                        ui.horizontal(|ui| {
+                                            ui.add_sized([LBL, 20.0], egui::Label::new($label));
+                                            ui.add_sized([SM, 20.0],
+                                                egui::TextEdit::singleline($field));
+                                        });
+                                    }};
+                                }
 
-                                        ui.label("Artist");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].artist).desired_width(avail));
-                                        ui.end_row();
+                                field_row!("Title",        &mut self.tracks[idx].title);
+                                field_row!("Artist",       &mut self.tracks[idx].artist);
+                                field_row!("Album",        &mut self.tracks[idx].album);
+                                field_row!("Album Artist", &mut self.tracks[idx].album_artist);
+                                field_row!("Genre",        &mut self.tracks[idx].genre);
+                                field_row!("Composer",     &mut self.tracks[idx].composer);
+                                field_row!("Comments",     &mut self.tracks[idx].comments);
+                                small_row!("Year",         &mut self.tracks[idx].year);
+                                small_row!("Track #",      &mut self.tracks[idx].track_number);
 
-                                        ui.label("Album");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].album).desired_width(avail));
-                                        ui.end_row();
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([LBL, 20.0], egui::Label::new("Pinned"));
+                                    ui.checkbox(&mut self.tracks[idx].pinned, "");
+                                });
 
-                                        ui.label("Album Artist");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].album_artist).desired_width(avail));
-                                        ui.end_row();
+                                ui.add_space(2.0);
+                                ui.separator();
 
-                                        ui.label("Genre");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].genre).desired_width(avail));
-                                        ui.end_row();
+                                // Start / End as MM:SS text fields
+                                let track_end   = self.tracks[idx].end;
+                                let track_start = self.tracks[idx].start;
+                                let max_end     = self.waveform_duration.max(track_start + 0.1);
 
-                                        ui.label("Year");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].year).desired_width(50.0));
-                                        ui.end_row();
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([LBL, 20.0], egui::Label::new("Start"));
+                                    let w = (ui.available_width() - GAP).max(60.0);
+                                    let id = egui::Id::new(("edit_start", idx));
+                                    let resp = time_text_edit(ui, &mut self.tracks[idx].start, id, w);
+                                    if resp.lost_focus() {
+                                        // Clamp after parse
+                                        self.tracks[idx].start = self.tracks[idx].start
+                                            .max(0.0)
+                                            .min((track_end - 0.1).max(0.0));
+                                    }
+                                });
 
-                                        ui.label("Track #");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].track_number).desired_width(50.0));
-                                        ui.end_row();
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([LBL, 20.0], egui::Label::new("End"));
+                                    let w = (ui.available_width() - GAP).max(60.0);
+                                    let id = egui::Id::new(("edit_end", idx));
+                                    let resp = time_text_edit(ui, &mut self.tracks[idx].end, id, w);
+                                    if resp.lost_focus() {
+                                        self.tracks[idx].end = self.tracks[idx].end
+                                            .max(track_start + 0.1)
+                                            .min(max_end);
+                                        let new_end = self.tracks[idx].end;
+                                        // Push the next track's start forward if it now overlaps
+                                        if let Some(next) = self.tracks.get_mut(idx + 1) {
+                                            if next.start < new_end {
+                                                next.start = new_end + 1.0;
+                                            }
+                                        }
+                                    }
+                                });
 
-                                        ui.label("Composer");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].composer).desired_width(avail));
-                                        ui.end_row();
-
-                                        ui.label("Comments");
-                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].comments).desired_width(avail));
-                                        ui.end_row();
-
-                                        ui.label("Pinned");
-                                        ui.checkbox(&mut self.tracks[idx].pinned, "");
-                                        ui.end_row();
-
-                                        ui.label("");
-                                        ui.separator();
-                                        ui.end_row();
-
-                                        let track_end   = self.tracks[idx].end;
-                                        let track_start = self.tracks[idx].start;
-                                        let max_end     = self.waveform_duration.max(track_start + 0.1);
-
-                                        ui.label("Start (s)");
-                                        ui.add(
-                                            egui::DragValue::new(&mut self.tracks[idx].start)
-                                                .speed(0.05)
-                                                .range(0.0..=(track_end - 0.1).max(0.0))
-                                                .fixed_decimals(2)
-                                        );
-                                        ui.end_row();
-
-                                        ui.label("End (s)");
-                                        ui.add(
-                                            egui::DragValue::new(&mut self.tracks[idx].end)
-                                                .speed(0.05)
-                                                .range((track_start + 0.1)..=max_end)
-                                                .fixed_decimals(2)
-                                        );
-                                        ui.end_row();
-
-                                        ui.label("Duration");
-                                        ui.label(format!("{:.2}s", track_end - track_start));
-                                        ui.end_row();
-                                    });
+                                ui.horizontal(|ui| {
+                                    ui.add_sized([LBL, 20.0], egui::Label::new("Duration"));
+                                    let w = (ui.available_width() - GAP).max(60.0);
+                                    let id = egui::Id::new(("edit_dur", idx));
+                                    let mut dur = self.tracks[idx].end - self.tracks[idx].start;
+                                    let resp = time_text_edit(ui, &mut dur, id, w);
+                                    if resp.lost_focus() {
+                                        let dur = dur.max(0.1);
+                                        let new_end = (self.tracks[idx].start + dur)
+                                            .min(max_end);
+                                        self.tracks[idx].end = new_end;
+                                        // Cascade: push next track's start forward if it overlaps
+                                        if let Some(next) = self.tracks.get_mut(idx + 1) {
+                                            if next.start < new_end {
+                                                next.start = new_end + 1.0;
+                                            }
+                                        }
+                                    }
+                                });
 
                                 ui.add_space(4.0);
                                 ui.separator();
@@ -1731,4 +1778,55 @@ fn fmt_secs(secs: f64) -> String {
     let m = (secs / 60.0) as u32;
     let s = secs % 60.0;
     format!("{:02}:{:05.2}", m, s)
+}
+
+/// Format seconds as MM:SS.ss
+fn fmt_mmss(secs: f64) -> String {
+    fmt_secs(secs)
+}
+
+/// Parse "MM:SS.ss" or "SS.ss" into seconds. Returns None on invalid input.
+fn parse_mmss(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if let Some(colon) = s.find(':') {
+        let mins: f64 = s[..colon].trim().parse().ok()?;
+        let secs: f64 = s[colon + 1..].trim().parse().ok()?;
+        if secs >= 60.0 { return None; }
+        Some(mins * 60.0 + secs)
+    } else {
+        s.parse().ok()
+    }
+}
+
+/// A text field that displays and accepts time in MM:SS.ss format.
+/// Stores seconds as f64. Returns the inner response.
+fn time_text_edit(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    id: egui::Id,
+    width: f32,
+) -> egui::Response {
+    let mut buf: String = ui.data(|d| d.get_temp::<String>(id))
+        .unwrap_or_else(|| fmt_mmss(*value));
+
+    let resp = ui.add_sized(
+        [width, 20.0],
+        egui::TextEdit::singleline(&mut buf).hint_text("MM:SS.ss"),
+    );
+
+    if resp.gained_focus() {
+        buf = fmt_mmss(*value);
+    }
+
+    if resp.lost_focus() {
+        if let Some(parsed) = parse_mmss(&buf) {
+            *value = parsed;
+        }
+        buf = fmt_mmss(*value);
+        ui.data_mut(|d| d.remove::<String>(id));
+    } else {
+        ui.data_mut(|d| d.insert_temp(id, buf));
+    }
+
+    resp
 }

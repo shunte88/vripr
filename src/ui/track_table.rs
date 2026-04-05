@@ -88,7 +88,10 @@ pub fn show_track_table(
                     // Status icon
                     row.col(|ui| {
                         let icon = tracks[row_idx].status_icon();
-                        ui.label(icon);
+                        let r = ui.label(icon);
+                        if r.double_clicked() {
+                            action = TableAction::Edit(row_idx);
+                        }
                     });
 
                     // Track number (#)
@@ -110,7 +113,9 @@ pub fn show_track_table(
                     row.col(|ui| {
                         let time = tracks[row_idx].display_time();
                         let response = ui.label(&time);
-                        if response.clicked() {
+                        if response.double_clicked() {
+                            action = TableAction::Edit(row_idx);
+                        } else if response.clicked() {
                             if !ui.input(|i| i.modifiers.ctrl) {
                                 selected_rows.clear();
                             }
@@ -124,7 +129,9 @@ pub fn show_track_table(
                             egui::TextEdit::singleline(&mut tracks[row_idx].title)
                                 .desired_width(190.0)
                         );
-                        if response.clicked() {
+                        if response.double_clicked() {
+                            action = TableAction::Edit(row_idx);
+                        } else if response.clicked() {
                             if !ui.input(|i| i.modifiers.ctrl) {
                                 selected_rows.clear();
                             }
