@@ -28,10 +28,7 @@ pub struct TrackUpdate {
     pub genre: Option<String>,
     pub track_number: Option<String>,
     pub year: Option<String>,
-    pub acoustid: Option<String>,
-    pub mb_recording_id: Option<String>,
     pub discogs_release_id: Option<String>,
-    pub fingerprint_done: Option<bool>,
     pub export_path: Option<std::path::PathBuf>,
 }
 

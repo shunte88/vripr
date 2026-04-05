@@ -229,8 +229,8 @@ pub fn detect_tracks_spectral(
     let thr_entry_lin = db_to_linear(threshold_db - cfg.hysteresis_db);
     let flat_thr      = cfg.spectral_flatness_threshold;
 
-    // --- Smooth flatness with a ±2-window rolling average (≈250 ms at 50 ms windows) ---
-    let smooth_r = 2usize;
+    // --- Smooth flatness with a ±3-window rolling average (≈350 ms at 50 ms windows) ---
+    let smooth_r = 3usize;
     let flatness_raw: Vec<f64> = windows.iter().map(|(_, f)| *f).collect();
     let flatness: Vec<f64> = (0..n_windows)
         .map(|i| {
@@ -272,7 +272,16 @@ pub fn detect_tracks_spectral(
 
     debug!("Spectral raw regions: {}", sound_regions.len());
 
-    // --- Post-processing: gap fill, min-silence merge, min-sound filter, padding ---
+    // --- Post-processing: transient filter, gap fill, min-silence merge, min-sound filter ---
+    // Drop very short "music" bursts (pops / transients that briefly pass the flatness test)
+    // before gap-filling — otherwise they get bridged into adjacent regions.
+    let min_transient_secs = 0.35;
+    let sound_regions: Vec<(f64, f64)> = sound_regions
+        .into_iter()
+        .filter(|(s, e)| (e - s) >= min_transient_secs)
+        .collect();
+    debug!("After transient filter: {}", sound_regions.len());
+
     let sound_regions = merge_gaps(sound_regions, cfg.gap_fill_secs);
     let sound_regions = merge_gaps(sound_regions, cfg.min_silence_secs);
     let sound_regions: Vec<(f64, f64)> = sound_regions

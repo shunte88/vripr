@@ -298,6 +298,28 @@ impl AudacityPipe {
         Ok(())
     }
 
+    /// Select a time region and start playback in Audacity.
+    ///
+    /// Audacity plays the selected region and returns immediately — playback
+    /// continues asynchronously. Call `stop_playback` to stop it early.
+    pub fn play_region(&mut self, start: f64, end: f64) -> Result<()> {
+        let cmd = format!(
+            "SelectTime: Start={:.3} End={:.3} RelativeTo=ProjectStart",
+            start, end
+        );
+        self.send(&cmd).context("SelectTime for playback failed")?;
+        self.send("SelectTracks: Track=0 TrackCount=1 Mode=Set")
+            .context("SelectTracks for playback failed")?;
+        self.send("Play:").context("Play command failed")?;
+        Ok(())
+    }
+
+    /// Stop playback in Audacity.
+    pub fn stop_playback(&mut self) -> Result<()> {
+        self.send("Stop:").context("Stop command failed")?;
+        Ok(())
+    }
+
     /// Export the current selection to a file.
     pub fn export_selection(&mut self, path: &std::path::Path, channels: u8) -> Result<()> {
         let path_str = path.to_string_lossy();

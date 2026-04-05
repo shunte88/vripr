@@ -1,9 +1,17 @@
 use egui::{Context, Ui};
 
 use crate::config::{Config, DetectionMethod, ExportFormat, TrackNumberFormat};
+
+/// Signal returned from the settings dialog to the caller.
+#[derive(Default)]
+pub struct SettingsResult {
+    /// True when Save was clicked — caller should call reload_genre_map if needed.
+    pub saved: bool,
+}
 use crate::workers::export::{validate_path_template, SUPPORTED_TOKENS};
 
-pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool) {
+pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool) -> SettingsResult {
+    let mut result = SettingsResult::default();
     // Keep a working copy in egui temp storage so edits are only committed on Save.
     // Cancel (or the window X button) discards the working copy without touching config.
     let working_id = egui::Id::new("settings_working_config");
@@ -66,18 +74,19 @@ pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool)
         if let Err(e) = config.save() {
             tracing::warn!("Failed to save config: {}", e);
         }
+        result.saved = true;
     }
 
     if should_close || !was_shown {
-        // Discard the working copy — next open will re-seed from current config.
         ctx.data_mut(|d| d.remove::<Config>(working_id));
         if should_close {
             *open = false;
         }
     } else {
-        // Persist edits-in-progress across frames.
         ctx.data_mut(|d| d.insert_temp(working_id, working));
     }
+
+    result
 }
 
 fn show_api_keys_section(ui: &mut Ui, config: &mut Config) {
@@ -313,6 +322,30 @@ fn show_defaults_section(ui: &mut Ui, config: &mut Config) {
                         "Numeric (1, 2, 3 …)",
                     );
                 });
+            ui.end_row();
+
+            ui.label("Genre Map File:")
+                .on_hover_text("Custom genre.dat file. Leave empty to use the built-in mappings.");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut config.custom_genre_dat)
+                        .desired_width(220.0)
+                        .hint_text("Built-in (default)"),
+                );
+                if ui.small_button("…").on_hover_text("Browse for a genre.dat file").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Genre map", &["dat", "txt"])
+                        .pick_file()
+                    {
+                        config.custom_genre_dat = path.to_string_lossy().into_owned();
+                    }
+                }
+                if !config.custom_genre_dat.is_empty()
+                    && ui.small_button("✕").on_hover_text("Revert to built-in").clicked()
+                {
+                    config.custom_genre_dat.clear();
+                }
+            });
             ui.end_row();
         });
 }

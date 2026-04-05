@@ -430,8 +430,83 @@ pub async fn discogs_search_candidates(
     Ok(candidates)
 }
 
+/// Search Discogs by catalogue number (catno= parameter).
+/// Returns up to `max_results` candidates — typically very few for a specific cat number.
+pub async fn discogs_search_by_catno(
+    catno:       &str,
+    token:       &str,
+    max_results: usize,
+) -> Result<Vec<DiscogsCandidate>> {
+    if token.is_empty() || catno.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    debug!("Discogs catno search: {}", catno);
+
+    let url = format!(
+        "https://api.discogs.com/database/search?catno={}&type=release&per_page={}&token={}",
+        urlencoding_simple(catno.trim()),
+        max_results.max(1).min(50),
+        token
+    );
+
+    rate_limit().await;
+
+    let resp = http_client()
+        .get(&url)
+        .send()
+        .await
+        .context("Discogs catno search failed")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body   = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Discogs HTTP {} — {}", status, body.trim()));
+    }
+
+    let json: serde_json::Value = resp.json().await.context("Discogs catno search parse failed")?;
+    let raw_count = json["results"].as_array().map(|a| a.len()).unwrap_or(0);
+    info!("Discogs catno search returned {} result(s) for {:?}", raw_count, catno);
+
+    let results = match json["results"].as_array() {
+        Some(r) if !r.is_empty() => r,
+        _ => return Ok(Vec::new()),
+    };
+
+    let candidates = results
+        .iter()
+        .take(max_results)
+        .filter_map(|item| {
+            let id = item["id"].as_u64()?.to_string();
+            let raw_title = item["title"].as_str().unwrap_or("").to_string();
+            let (artist, album) = if let Some(idx) = raw_title.find(" - ") {
+                (raw_title[..idx].to_string(), raw_title[idx + 3..].to_string())
+            } else {
+                (String::new(), raw_title.clone())
+            };
+            let year = item["year"].as_str()
+                .map(|s| s.to_string())
+                .or_else(|| item["year"].as_u64().map(|y| y.to_string()))
+                .unwrap_or_default();
+            let label = item["label"].as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
+            let format = item["format"].as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            let country = item["country"].as_str().unwrap_or("").to_string();
+            let catno_val = item["catno"].as_str().unwrap_or("").to_string();
+            let uri = item["uri"].as_str().unwrap_or("").to_string();
+            let track_count = item["tracklist"].as_array().map(|a| a.len());
+            Some(DiscogsCandidate { id, raw_title, artist, album, year, label, format, country, catno: catno_val, uri, track_count })
+        })
+        .collect();
+
+    Ok(candidates)
+}
+
 /// Quick search — returns basic album metadata only (no tracklist).
-/// Kept for backward compatibility with the fingerprint worker.
 pub async fn discogs_search(
     artist: &str,
     album: &str,
@@ -533,11 +608,18 @@ fn release_from_json(json: &serde_json::Value, release_id: &str) -> DiscogsRelea
         .map(|y| y.to_string())
         .unwrap_or_default();
 
-    let genre = json["genres"].as_array()
-        .and_then(|g| g.first())
-        .and_then(|g| g.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Combine Discogs genres[] + styles[] into a semicolon-delimited string.
+    // Both arrays are used: genres are broad categories, styles are sub-genres.
+    let genre = {
+        let mut all: Vec<&str> = Vec::new();
+        if let Some(arr) = json["genres"].as_array() {
+            all.extend(arr.iter().filter_map(|v| v.as_str()));
+        }
+        if let Some(arr) = json["styles"].as_array() {
+            all.extend(arr.iter().filter_map(|v| v.as_str()));
+        }
+        all.join(";")
+    };
 
     let label = json["labels"].as_array()
         .and_then(|l| l.first())

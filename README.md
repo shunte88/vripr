@@ -149,6 +149,49 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 | **Detection Method** | `RMS` (default) or `Spectral` — see [Detection algorithm](#detection-algorithm) |
 | **Flatness threshold** | Spectral mode only: flatness above this is treated as noise (0.5–0.99, default 0.85) |
 | **Track Number Format** | Alpha (A1, B2 …) for vinyl positions or Numeric (1, 2, 3 …) |
+| **Genre Map File** | Path to a custom `genre.dat` file — see [Genre normalisation](#genre-normalisation) below. Leave empty to use the built-in mappings. |
+
+---
+
+## Genre normalisation
+
+VRipr normalises genre tags on export using a mapping table (`genre.dat`). The built-in table ships with ~640 entries drawn from the [sanitizegenre](https://github.com/shunte88/sanitizegenre) project and covers:
+
+- **Abbreviations** — `HH` → `Hip-Hop;Hip Hop`, `DT` → `Dub Techno`, `E` → `Electronic` …
+- **Typo corrections** — `Trchno` → `Techno`, `Popo` → `Pop`, `Shoegzae` → `Shoegaze` …
+- **Case normalisation** — `TECHNO` → `Techno`, `HOUSE` → `House` …
+- **Multi-genre expansion** — `Folk Pop` → `Folk Pop;Folk;Pop`, `Prog Rock` → `Prog Rock;Prog-Rock;Progressive Rock;Progressive` …
+- **Discogs styles** — when a release is fetched, both the `genres[]` and `styles[]` arrays are combined into a semicolon-delimited string (e.g. `Electronic;Deep House;House`) so the full genre hierarchy is preserved through to the exported tags
+
+On export each semicolon-delimited component is looked up, expanded, deduplicated, and written as one `GENRE` tag per value. Players that support multi-value tags (foobar2000, beets, Picard, Kodi, Plex…) will display and filter on all genres. Single-value players receive the first genre.
+
+### Bespoke genre maps
+
+You can supply your own `genre.dat` to match your personal library conventions, language preferences, or custom taxonomy. The format is one mapping per line:
+
+```
+# comment lines start with #
+SourceString|Target1;Target2;Target3
+```
+
+- **Source** is the raw string that appears in the genre field (exact match first, case-insensitive fallback).
+- **Target** is a semicolon-separated list of canonical output values.
+- Unknown genres pass through unchanged — you only need to list the exceptions.
+
+Example entries:
+
+```
+# French genre names
+Électronique|Electronic
+Jazz Fusion|Jazz Fusion;Jazz
+Hip Hop|Hip-Hop;Hip Hop;Rap
+
+# Studio-internal codes
+EXP|Experimental;Electronic
+CJAZZ|Contemporary Jazz;Jazz
+```
+
+To activate a custom file: open **Settings → Genre Map File**, click **…**, and select your `.dat` file. The map is loaded immediately on Save and persisted to `vripr.toml`. Click **✕** in the field to revert to the built-in mappings.
 
 ---
 

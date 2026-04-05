@@ -201,6 +201,8 @@ struct DefaultsSection {
     year: String,
     #[serde(default = "default_track_number_format")]
     track_number_format: String,
+    #[serde(default)]
+    custom_genre_dat: String,
 }
 
 impl Default for DefaultsSection {
@@ -212,6 +214,7 @@ impl Default for DefaultsSection {
             genre:               String::new(),
             year:                String::new(),
             track_number_format: default_track_number_format(),
+            custom_genre_dat:    String::new(),
         }
     }
 }
@@ -269,6 +272,8 @@ pub struct Config {
     pub default_genre: String,
     pub default_year: String,
     pub track_number_format: TrackNumberFormat,
+    /// Path to a custom genre.dat file. Empty string = use the built-in mappings.
+    pub custom_genre_dat: String,
 }
 
 impl Default for Config {
@@ -303,6 +308,7 @@ impl Config {
             default_genre:          f.defaults.genre,
             default_year:           f.defaults.year,
             track_number_format:    TrackNumberFormat::from_str(&f.defaults.track_number_format),
+            custom_genre_dat:       f.defaults.custom_genre_dat,
         }
     }
 
@@ -333,6 +339,7 @@ impl Config {
                 genre:               self.default_genre.clone(),
                 year:                self.default_year.clone(),
                 track_number_format: self.track_number_format.as_str().to_string(),
+                custom_genre_dat:    self.custom_genre_dat.clone(),
             },
         }
     }

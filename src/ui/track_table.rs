@@ -8,11 +8,9 @@ use crate::workers::AppSender;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableAction {
     None,
-    Remove(usize),
-    MoveUp(usize),
-    MoveDown(usize),
+    Edit(usize),
+    Delete(usize),
     AddTrack,
-    Fingerprint(Vec<usize>),
     Export(Vec<usize>),
 }
 
@@ -49,13 +47,10 @@ pub fn show_track_table(
         .column(Column::initial(130.0).at_least(60.0))  // Album Artist
         .column(Column::initial(90.0).at_least(50.0))   // Genre
         .column(Column::initial(55.0).at_least(40.0))   // Year
-        .column(Column::initial(80.0).at_least(80.0))   // Actions
+        .column(Column::initial(28.0).at_least(24.0))   // Edit
+        .column(Column::initial(28.0).at_least(24.0))   // Delete
         .min_scrolled_height(0.0)
         .max_scroll_height(available_height);
-
-    let mut remove_idx: Option<usize> = None;
-    let mut move_up_idx: Option<usize> = None;
-    let mut move_down_idx: Option<usize> = None;
 
     table
         .header(20.0, |mut header| {
@@ -68,7 +63,8 @@ pub fn show_track_table(
             header.col(|ui| { ui.strong("Album Artist"); });
             header.col(|ui| { ui.strong("Genre"); });
             header.col(|ui| { ui.strong("Year"); });
-            header.col(|ui| { ui.strong("Actions"); });
+            header.col(|ui| { ui.strong(""); });
+            header.col(|ui| { ui.strong(""); });
         })
         .body(|mut body| {
             let n = tracks.len();
@@ -176,35 +172,31 @@ pub fn show_track_table(
                         );
                     });
 
-                    // Actions: ▲ ▼ ✕
+                    // Edit button
                     row.col(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            if ui.small_button("▲").clicked() {
-                                move_up_idx = Some(row_idx);
-                            }
-                            if ui.small_button("▼").clicked() {
-                                move_down_idx = Some(row_idx);
-                            }
-                            if ui.small_button("✕").on_hover_text("Remove track").clicked() {
-                                remove_idx = Some(row_idx);
-                            }
-                        });
+                        if ui.small_button("✏").on_hover_text("Edit track").clicked() {
+                            action = TableAction::Edit(row_idx);
+                        }
+                    });
+
+                    // Delete button
+                    row.col(|ui| {
+                        if ui.small_button("🗑").on_hover_text("Delete track").clicked() {
+                            action = TableAction::Delete(row_idx);
+                        }
                     });
                 });
             }
         });
 
-    // Handle deferred actions (can't mutate tracks inside table body)
-    if let Some(idx) = remove_idx {
-        action = TableAction::Remove(idx);
-    } else if let Some(idx) = move_up_idx {
-        action = TableAction::MoveUp(idx);
-    } else if let Some(idx) = move_down_idx {
-        action = TableAction::MoveDown(idx);
-    }
-
     action
+}
+
+/// Return value for the apply-all strip.
+#[derive(Debug, Default)]
+pub struct ApplyAllResult {
+    pub apply_clicked:   bool,
+    pub fetch_by_catno:  bool,
 }
 
 /// Apply-to-all strip above the track table.
@@ -215,11 +207,11 @@ pub fn show_apply_all_strip(
     apply_album_artist: &mut String,
     apply_genre: &mut String,
     apply_year: &mut String,
-) -> bool {
-    let mut apply_clicked = false;
+    apply_catalog: &mut String,
+) -> ApplyAllResult {
+    let mut result = ApplyAllResult::default();
 
     ui.horizontal(|ui| {
-        ui.label("Apply to all:");
         ui.label("Artist:");
         ui.add(egui::TextEdit::singleline(apply_artist).desired_width(110.0));
         ui.label("Album:");
@@ -231,9 +223,27 @@ pub fn show_apply_all_strip(
         ui.label("Year:");
         ui.add(egui::TextEdit::singleline(apply_year).desired_width(50.0));
         if ui.button("Apply").clicked() {
-            apply_clicked = true;
+            result.apply_clicked = true;
+        }
+
+        ui.separator();
+
+        ui.label("Cat#:")
+            .on_hover_text("Fetch a Discogs release directly by catalogue number");
+        let catno_resp = ui.add(
+            egui::TextEdit::singleline(apply_catalog)
+                .desired_width(90.0)
+                .hint_text("e.g. ECM 1064"),
+        );
+        let fetch_btn = ui.button("🔍 Fetch");
+        if fetch_btn.clicked()
+            || (catno_resp.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && !apply_catalog.trim().is_empty())
+        {
+            result.fetch_by_catno = true;
         }
     });
 
-    apply_clicked
+    result
 }

@@ -1,6 +1,6 @@
 [package]
 name = "vripr"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "VRipr — Master Vinyl Rippage — Audacity assistant for digitising vinyl records"
 license = "MIT"
@@ -33,6 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rfd = "0.15"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["user"] }

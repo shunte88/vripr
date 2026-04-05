@@ -4,6 +4,7 @@ use lofty::probe::Probe;
 use std::path::Path;
 use tracing::debug;
 
+use crate::metadata::sanitize_genres;
 use crate::track::TrackMeta;
 
 /// Write all metadata tags to an exported audio file.
@@ -52,8 +53,15 @@ pub fn write_tags(filepath: &Path, track: &TrackMeta, effective_comments: &str) 
             track.discogs_release_id.clone(),
         );
     }
-    if !track.genre.is_empty() {
-        tag.set_genre(track.genre.clone());
+    // Sanitize and expand the semicolon-delimited genre string, then write
+    // one tag item per genre so players that support multi-value tags see all of them.
+    let genres = sanitize_genres(&track.genre);
+    if !genres.is_empty() {
+        use lofty::tag::{ItemKey, ItemValue, TagItem};
+        tag.remove_key(&ItemKey::Genre);
+        for g in &genres {
+            tag.push(TagItem::new(ItemKey::Genre, ItemValue::Text(g.clone())));
+        }
     }
     if !track.track_number.is_empty() {
         if let Ok(n) = track.track_number.parse::<u32>() {

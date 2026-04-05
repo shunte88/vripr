@@ -8,12 +8,13 @@ use crate::audio::{detect_tracks, detect_tracks_spectral, DetectorConfig};
 use crate::config::{Config, DetectionMethod};
 use crate::metadata::{
     assign_discogs_titles, compare_duration_report, discogs_encode_query,
-    discogs_fetch_image, discogs_fetch_release, discogs_search_candidates,
+    discogs_fetch_image, discogs_fetch_release, discogs_search_candidates, discogs_search_by_catno,
     split_by_discogs_durations_fmt,
     DiscogsCandidate, DiscogsRelease,
 };
 use crate::pipe::AudacityPipe;
 use crate::track::TrackMeta;
+use crate::metadata::reload_genre_map;
 use crate::ui::{
     ManualTrackInput, TableAction, ToolbarAction, ToolbarState,
     show_discogs_picker, show_manual_track_dialog, show_settings_dialog,
@@ -47,6 +48,7 @@ pub struct VriprApp {
     apply_artist: String,
     apply_album: String,
     apply_album_artist: String,
+    apply_catalog: String,
     apply_genre: String,
     apply_year: String,
 
@@ -64,6 +66,8 @@ pub struct VriprApp {
     pub discogs_candidates: Vec<DiscogsCandidate>,
     pub discogs_picker_open: bool,
     discogs_picker_token: String,
+    /// When true, auto-accept the sole candidate on the next update() tick.
+    discogs_auto_accept: bool,
 
     // Cover art
     cover_texture: Option<egui::TextureHandle>,
@@ -71,11 +75,17 @@ pub struct VriprApp {
     pending_cover_bytes: Option<Vec<u8>>, // queued for texture creation on main thread
     custom_cover_path: String,
 
+    /// Index of the track currently open in the edit panel. None = closed.
+    editing_track_index: Option<usize>,
+
     // Waveform display
     waveform_samples: Option<Vec<f32>>,
     waveform_duration: f64,
     waveform_drag: Option<crate::ui::WaveformDragState>,
     waveform_selection: Option<(f64, f64)>, // active selection band in seconds
+    waveform_zoom: Option<(f64, f64)>,      // None = full view; Some(start,end) = zoomed 20s window
+    /// When Some, Audacity is playing; holds the expected finish time for the indicator.
+    play_end: Option<std::time::Instant>,
     /// Path to the WAV exported from Audacity on connect — used for detection.
     pub analysis_wav: Option<std::path::PathBuf>,
 }
@@ -96,6 +106,13 @@ impl VriprApp {
         });
 
         let config = Config::load();
+        // Apply custom genre map from persisted config, if set.
+        {
+            let custom = config.custom_genre_dat.trim();
+            if !custom.is_empty() {
+                reload_genre_map(Some(std::path::Path::new(custom)));
+            }
+        }
         let (worker_tx, worker_rx) = mpsc::channel();
 
         VriprApp {
@@ -119,6 +136,7 @@ impl VriprApp {
             apply_artist: String::new(),
             apply_album: String::new(),
             apply_album_artist: String::new(),
+            apply_catalog: String::new(),
             apply_genre: String::new(),
             apply_year: String::new(),
             progress: None,
@@ -127,15 +145,19 @@ impl VriprApp {
             selected_side: None,
             discogs_candidates: Vec::new(),
             discogs_picker_open: false,
+            discogs_auto_accept: false,
             discogs_picker_token: String::new(),
             cover_texture: None,
             cover_image_bytes: None,
             pending_cover_bytes: None,
             custom_cover_path: String::new(),
+            editing_track_index: None,
             waveform_samples: None,
             waveform_duration: 0.0,
             waveform_drag: None,
             waveform_selection: None,
+            waveform_zoom: None,
+            play_end: None,
             analysis_wav: None,
         }
     }
@@ -145,6 +167,7 @@ impl VriprApp {
         while let Ok(msg) = self.worker_rx.try_recv() {
             match msg {
                 WorkerMessage::Log(s) => {
+                    if s.is_empty() { continue; }
                     tracing::info!("[Worker] {}", s);
                     self.log_messages.push(s);
                     if self.log_messages.len() > 2000 {
@@ -179,7 +202,7 @@ impl VriprApp {
                 }
                 WorkerMessage::WorkerError(e) => {
                     self.is_busy = false;
-                    self.log_messages.push(format!("Error: {}", e));
+                    self.log_messages.push(format!("✗ {}", e));
                 }
                 WorkerMessage::WorkerFinished => {
                     self.is_busy = false;
@@ -189,6 +212,12 @@ impl VriprApp {
                     self.is_busy = false;
                     if candidates.is_empty() {
                         self.log_messages.push("Discogs: no results found.".into());
+                    } else if candidates.len() == 1 {
+                        self.log_messages.push(format!(
+                            "Discogs: 1 result — auto-selecting: {}", candidates[0].summary()
+                        ));
+                        self.discogs_candidates  = candidates;
+                        self.discogs_auto_accept = true;
                     } else {
                         self.log_messages.push(format!(
                             "Discogs: {} candidate(s) found:", candidates.len()
@@ -278,10 +307,7 @@ impl VriprApp {
             if let Some(v) = update.genre { if !v.is_empty() { track.genre = v; } }
             if let Some(v) = update.track_number { if !v.is_empty() { track.track_number = v; } }
             if let Some(v) = update.year { if !v.is_empty() { track.year = v; } }
-            if let Some(v) = update.acoustid { track.acoustid = v; }
-            if let Some(v) = update.mb_recording_id { track.mb_recording_id = v; }
             if let Some(v) = update.discogs_release_id { track.discogs_release_id = v; }
-            if let Some(v) = update.fingerprint_done { track.fingerprint_done = v; }
             if let Some(v) = update.export_path { track.export_path = Some(v); }
         }
     }
@@ -515,7 +541,7 @@ impl VriprApp {
                 (true,  false) => album,
                 (true,  true)  => {
                     self.log_messages.push(
-                        "Set Artist and/or Album in the apply-all strip before fetching.".into()
+                        "⚠ Set Artist and/or Album in the apply-all strip before fetching.".into()
                     );
                     return;
                 }
@@ -523,7 +549,7 @@ impl VriprApp {
         };
 
         if self.config.discogs_token.is_empty() {
-            self.log_messages.push("Discogs token not set — open Settings.".into());
+            self.log_messages.push("⚠ Discogs token not set — open Settings.".into());
             return;
         }
 
@@ -552,6 +578,38 @@ impl VriprApp {
                 Err(e) => {
                     let _ = tx.send(WorkerMessage::WorkerError(
                         format!("Discogs search error: {}", e)
+                    ));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn fetch_discogs_by_catno(&mut self, catno: String, ctx: egui::Context) {
+        if self.config.discogs_token.is_empty() {
+            self.log_messages.push("⚠ Discogs token not set — open Settings.".into());
+            return;
+        }
+        if self.is_busy { return; }
+
+        self.is_busy = true;
+        self.discogs_picker_token = self.config.discogs_token.clone();
+        let token = self.config.discogs_token.clone();
+        let tx    = self.worker_tx.clone();
+
+        self.log_messages.push(format!("Searching Discogs by catalogue number: {}", catno));
+
+        self.rt.spawn(async move {
+            match discogs_search_by_catno(&catno, &token, 10).await {
+                Ok(candidates) => {
+                    let _ = tx.send(WorkerMessage::Log(format!(
+                        "Discogs catno search returned {} candidate(s)", candidates.len()
+                    )));
+                    let _ = tx.send(WorkerMessage::DiscogsSearchCandidates(candidates));
+                }
+                Err(e) => {
+                    let _ = tx.send(WorkerMessage::WorkerError(
+                        format!("Discogs catno search error: {}", e)
                     ));
                 }
             }
@@ -693,17 +751,30 @@ impl VriprApp {
                         ..DetectorConfig::default()
                     };
 
+                    let method_label = if use_spectral { "spectral" } else { "RMS" };
+                    if attempt == 0 {
+                        let _ = tx.send(WorkerMessage::Log(format!(
+                            "Scanning audio ({} detector)…", method_label
+                        )));
+                    }
+
                     let path2 = path.clone();
                     let tx2   = tx.clone();
                     let result = tokio::task::spawn_blocking(move || {
+                        let mut last_pct = 0u8;
+                        let progress_cb = &mut |p: f64| {
+                            let pct = (p * 100.0) as u8;
+                            if pct >= last_pct + 10 {
+                                last_pct = pct;
+                                let _ = tx2.send(WorkerMessage::Log(format!(
+                                    "  decoding… {}%", pct
+                                )));
+                            }
+                        };
                         if use_spectral {
-                            detect_tracks_spectral(&path2, &det_cfg, &mut |_| {
-                                let _ = tx2.send(WorkerMessage::Log(String::new()));
-                            })
+                            detect_tracks_spectral(&path2, &det_cfg, progress_cb)
                         } else {
-                            detect_tracks(&path2, &det_cfg, &mut |_| {
-                                let _ = tx2.send(WorkerMessage::Log(String::new()));
-                            })
+                            detect_tracks(&path2, &det_cfg, progress_cb)
                         }
                     }).await;
 
@@ -923,17 +994,30 @@ impl VriprApp {
                     spectral_flatness_threshold: config.spectral_flatness_threshold,
                     ..DetectorConfig::default()
                 };
+                let method_label = if use_spectral { "spectral" } else { "RMS" };
+                if attempt == 0 {
+                    let _ = tx.send(WorkerMessage::Log(format!(
+                        "Re-scanning audio ({} detector)…", method_label
+                    )));
+                }
+
                 let path2 = wav_path.clone();
                 let tx2   = tx.clone();
                 let result = tokio::task::spawn_blocking(move || {
+                    let mut last_pct = 0u8;
+                    let progress_cb = &mut |p: f64| {
+                        let pct = (p * 100.0) as u8;
+                        if pct >= last_pct + 10 {
+                            last_pct = pct;
+                            let _ = tx2.send(WorkerMessage::Log(format!(
+                                "  decoding… {}%", pct
+                            )));
+                        }
+                    };
                     if use_spectral {
-                        detect_tracks_spectral(&path2, &det_cfg, &mut |_| {
-                            let _ = tx2.send(WorkerMessage::Log(String::new()));
-                        })
+                        detect_tracks_spectral(&path2, &det_cfg, progress_cb)
                     } else {
-                        detect_tracks(&path2, &det_cfg, &mut |_| {
-                            let _ = tx2.send(WorkerMessage::Log(String::new()));
-                        })
+                        detect_tracks(&path2, &det_cfg, progress_cb)
                     }
                 }).await;
 
@@ -1072,6 +1156,14 @@ impl VriprApp {
     }
 
     fn show_waveform_panel(&mut self, ctx: &egui::Context) {
+        // Auto-clear playing state when the expected duration has elapsed
+        if let Some(end) = self.play_end {
+            if std::time::Instant::now() >= end {
+                self.play_end = None;
+            }
+        }
+        let is_playing = self.play_end.is_some();
+
         // Extract data before any borrows of self (avoids borrow conflicts)
         let wf_data = self.waveform_samples.as_ref().map(|s| {
             (s.clone(), self.waveform_duration, self.waveform_drag.clone())
@@ -1082,15 +1174,17 @@ impl VriprApp {
             .map(|t| (t.index, t.start, t.end, t.pinned))
             .collect();
 
-        let mut sel = self.waveform_selection;
+        let mut sel  = self.waveform_selection;
+        let mut zoom = self.waveform_zoom;
 
         let evt = crate::ui::waveform::show_waveform(
-            ctx, &samples, duration, &track_bounds, &mut drag, &mut sel,
+            ctx, &samples, duration, &track_bounds, &mut drag, &mut sel, &mut zoom, is_playing,
         );
 
         // Write back persistent state
         self.waveform_drag      = drag;
         self.waveform_selection = sel;
+        self.waveform_zoom      = zoom;
 
         // Handle pin toggle
         if let Some(vi) = evt.toggle_pin {
@@ -1125,6 +1219,59 @@ impl VriprApp {
                         next.start = new_end;
                     }
                 }
+            }
+        }
+
+        // P key: set end of the track to the left of pin_at; push next track start if needed
+        if let Some(t) = evt.pin_at {
+            // Stop playback when P is pressed
+            if self.play_end.is_some() {
+                if let Ok(mut pipe) = self.pipe.lock() {
+                    let _ = pipe.stop_playback();
+                }
+                self.play_end = None;
+            }
+            // Find the track that contains t (or is immediately left of t)
+            let left_vi = self.tracks.iter().rposition(|tr| tr.start <= t);
+            if let Some(vi) = left_vi {
+                let min_end = self.tracks[vi].start + 0.5;
+                self.tracks[vi].end = t.max(min_end);
+                let new_end = self.tracks[vi].end;
+                // Push next track's start if it would overlap
+                if let Some(next) = self.tracks.get_mut(vi + 1) {
+                    if next.start < new_end + 1.0 {
+                        next.start = new_end + 1.0;
+                    }
+                }
+                self.log_messages.push(format!(
+                    "Track {} end → {} (P)", self.tracks[vi].index, fmt_secs(new_end)
+                ));
+            }
+        }
+
+        // Space: toggle Audacity playback for the current zoom window
+        if evt.playback_toggle {
+            if self.play_end.is_some() {
+                // Stop playback
+                if let Ok(mut pipe) = self.pipe.lock() {
+                    let _ = pipe.stop_playback();
+                }
+                self.play_end = None;
+            } else if self.pipe_connected {
+                let (start, end) = self.waveform_zoom.unwrap_or((0.0, duration));
+                if let Ok(mut pipe) = self.pipe.lock() {
+                    match pipe.play_region(start, end) {
+                        Ok(_) => {
+                            let play_dur = std::time::Duration::from_secs_f64(end - start + 0.5);
+                            self.play_end = Some(std::time::Instant::now() + play_dur);
+                        }
+                        Err(e) => {
+                            self.log_messages.push(format!("⚠ Playback failed: {e}"));
+                        }
+                    }
+                }
+            } else {
+                self.log_messages.push("⚠ Connect to Audacity to use playback".into());
             }
         }
     }
@@ -1176,6 +1323,8 @@ impl VriprApp {
     }
 
     fn show_cover_panel(&mut self, ctx: &egui::Context) {
+        let mut delete_idx: Option<usize> = None;
+
         egui::SidePanel::right("cover_art_panel")
             .resizable(true)
             .default_width(220.0)
@@ -1237,7 +1386,133 @@ impl VriprApp {
                         self.load_cover_from_path(ctx, &path);
                     }
                 }
+
+                // Track editor
+                if let Some(idx) = self.editing_track_index {
+                    if idx < self.tracks.len() {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.strong(
+                                egui::RichText::new(format!("Track {}", self.tracks[idx].index))
+                                    .color(egui::Color32::from_rgb(137, 180, 250))
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("✕").on_hover_text("Close editor").clicked() {
+                                    self.editing_track_index = None;
+                                }
+                            });
+                        });
+
+                        egui::ScrollArea::vertical()
+                            .id_source("track_editor_scroll")
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                egui::Grid::new("track_editor_grid")
+                                    .num_columns(2)
+                                    .spacing([4.0, 4.0])
+                                    .show(ui, |ui| {
+                                        let avail = ui.available_width() - 60.0;
+
+                                        ui.label("Title");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].title).desired_width(avail));
+                                        ui.end_row();
+
+                                        ui.label("Artist");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].artist).desired_width(avail));
+                                        ui.end_row();
+
+                                        ui.label("Album");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].album).desired_width(avail));
+                                        ui.end_row();
+
+                                        ui.label("Album Artist");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].album_artist).desired_width(avail));
+                                        ui.end_row();
+
+                                        ui.label("Genre");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].genre).desired_width(avail));
+                                        ui.end_row();
+
+                                        ui.label("Year");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].year).desired_width(50.0));
+                                        ui.end_row();
+
+                                        ui.label("Track #");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].track_number).desired_width(50.0));
+                                        ui.end_row();
+
+                                        ui.label("Composer");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].composer).desired_width(avail));
+                                        ui.end_row();
+
+                                        ui.label("Comments");
+                                        ui.add(egui::TextEdit::singleline(&mut self.tracks[idx].comments).desired_width(avail));
+                                        ui.end_row();
+
+                                        ui.label("Pinned");
+                                        ui.checkbox(&mut self.tracks[idx].pinned, "");
+                                        ui.end_row();
+
+                                        ui.label("");
+                                        ui.separator();
+                                        ui.end_row();
+
+                                        let track_end   = self.tracks[idx].end;
+                                        let track_start = self.tracks[idx].start;
+                                        let max_end     = self.waveform_duration.max(track_start + 0.1);
+
+                                        ui.label("Start (s)");
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.tracks[idx].start)
+                                                .speed(0.05)
+                                                .range(0.0..=(track_end - 0.1).max(0.0))
+                                                .fixed_decimals(2)
+                                        );
+                                        ui.end_row();
+
+                                        ui.label("End (s)");
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.tracks[idx].end)
+                                                .speed(0.05)
+                                                .range((track_start + 0.1)..=max_end)
+                                                .fixed_decimals(2)
+                                        );
+                                        ui.end_row();
+
+                                        ui.label("Duration");
+                                        ui.label(format!("{:.2}s", track_end - track_start));
+                                        ui.end_row();
+                                    });
+
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    if ui.button(
+                                        egui::RichText::new("🗑 Delete")
+                                            .color(egui::Color32::from_rgb(243, 139, 168))
+                                    ).clicked() {
+                                        delete_idx = Some(idx);
+                                    }
+                                });
+                            });
+                    } else {
+                        self.editing_track_index = None;
+                    }
+                }
             });
+
+        if let Some(idx) = delete_idx {
+            if idx < self.tracks.len() {
+                let removed = self.tracks.remove(idx);
+                self.selected_rows.remove(&idx);
+                self.editing_track_index = None;
+                self.log_messages.push(format!("Removed track: {}", removed.title));
+                for (i, t) in self.tracks.iter_mut().enumerate() {
+                    t.index = i + 1;
+                }
+            }
+        }
     }
 
     fn show_central_panel(&mut self, ctx: &egui::Context) {
@@ -1249,15 +1524,19 @@ impl VriprApp {
             let apply_album_artist = &mut self.apply_album_artist;
             let apply_genre        = &mut self.apply_genre;
             let apply_year         = &mut self.apply_year;
+            let apply_catalog      = &mut self.apply_catalog;
 
-            if show_apply_all_strip(
+            let strip = show_apply_all_strip(
                 ui,
                 apply_artist,
                 apply_album,
                 apply_album_artist,
                 apply_genre,
                 apply_year,
-            ) {
+                apply_catalog,
+            );
+
+            if strip.apply_clicked {
                 for track in &mut self.tracks {
                     if !apply_artist.is_empty()       { track.artist       = apply_artist.clone(); }
                     if !apply_album.is_empty()        { track.album        = apply_album.clone(); }
@@ -1266,6 +1545,13 @@ impl VriprApp {
                     if !apply_year.is_empty()         { track.year         = apply_year.clone(); }
                 }
                 self.log_messages.push("Applied values to all tracks.".into());
+            }
+
+            if strip.fetch_by_catno {
+                let catno = apply_catalog.trim().to_string();
+                if !catno.is_empty() {
+                    self.fetch_discogs_by_catno(catno, ctx.clone());
+                }
             }
 
             ui.add_space(4.0);
@@ -1291,32 +1577,22 @@ impl VriprApp {
             );
 
             match action {
-                TableAction::Remove(idx) => {
-                    if idx < self.tracks.len() {
-                        let removed = self.tracks.remove(idx);
-                        self.selected_rows.remove(&idx);
-                        self.log_messages.push(format!("Removed track: {}", removed.title));
-                        for (i, t) in self.tracks.iter_mut().enumerate() {
-                            t.index = i + 1;
-                            if t.track_number.parse::<usize>().ok() == Some(idx + 1) {
-                                t.track_number = (i + 1).to_string();
-                            }
+                TableAction::Edit(idx) => {
+                    self.editing_track_index = Some(idx);
+                }
+                TableAction::Delete(idx) => {
+                    self.tracks.remove(idx);
+                    // Reindex track numbers
+                    for (i, t) in self.tracks.iter_mut().enumerate() {
+                        t.track_number = (i + 1).to_string();
+                    }
+                    // Close edit panel if it was open for this or a later track
+                    if let Some(edit_idx) = self.editing_track_index {
+                        if edit_idx >= idx {
+                            self.editing_track_index = None;
                         }
                     }
-                }
-                TableAction::MoveUp(idx) => {
-                    if idx > 0 && idx < self.tracks.len() {
-                        self.tracks.swap(idx - 1, idx);
-                        self.selected_rows.clear();
-                        self.selected_rows.insert(idx - 1);
-                    }
-                }
-                TableAction::MoveDown(idx) => {
-                    if idx + 1 < self.tracks.len() {
-                        self.tracks.swap(idx, idx + 1);
-                        self.selected_rows.clear();
-                        self.selected_rows.insert(idx + 1);
-                    }
+                    self.selected_rows.retain(|&r| r != idx);
                 }
                 TableAction::AddTrack => {
                     self.manual_track_open = true;
@@ -1349,10 +1625,17 @@ impl VriprApp {
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         for msg in &self.log_messages {
+                            let color = if msg.starts_with('✗') {
+                                egui::Color32::from_rgb(243, 139, 168) // red — error
+                            } else if msg.starts_with('⚠') {
+                                egui::Color32::from_rgb(249, 226, 175) // yellow — warning
+                            } else {
+                                egui::Color32::from_rgb(166, 227, 161) // green — info
+                            };
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(msg)
-                                        .color(egui::Color32::from_rgb(166, 227, 161))
+                                        .color(color)
                                         .monospace()
                                         .size(12.0)
                                 )
@@ -1377,7 +1660,16 @@ impl VriprApp {
 
         // Settings dialog
         if self.settings_open {
-            show_settings_dialog(ctx, &mut self.config, &mut self.settings_open);
+            let sr = show_settings_dialog(ctx, &mut self.config, &mut self.settings_open);
+            if sr.saved {
+                let custom = self.config.custom_genre_dat.trim();
+                let path = if custom.is_empty() {
+                    None
+                } else {
+                    Some(std::path::Path::new(custom))
+                };
+                reload_genre_map(path);
+            }
         }
 
         // Manual track dialog
@@ -1411,6 +1703,11 @@ impl eframe::App for VriprApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_messages();
 
+        if self.discogs_auto_accept {
+            self.discogs_auto_accept = false;
+            self.fetch_release_by_candidate(0, ctx.clone());
+        }
+
         // Convert any pending cover art bytes into a GPU texture
         if let Some(bytes) = self.pending_cover_bytes.take() {
             self.load_cover_texture(ctx, &bytes);
@@ -1428,4 +1725,10 @@ impl eframe::App for VriprApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+}
+
+fn fmt_secs(secs: f64) -> String {
+    let m = (secs / 60.0) as u32;
+    let s = secs % 60.0;
+    format!("{:02}:{:05.2}", m, s)
 }
