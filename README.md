@@ -12,6 +12,13 @@
   <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="Rust 1.75+"/>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey" alt="Platform"/>
+  <img src="version.svg" alt="Version"/>
+</p>
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/shunte88">
+    <img src="assets/bmc-red-button.svg" alt="Buy me a coffee" height="40"/>
+  </a>
 </p>
 
 ---
@@ -134,7 +141,7 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 | **Export Format** | FLAC (default), MP3, WAV, OGG |
 | **Export Directory** | Root output folder; the template is joined to this path |
 | **Path Template** | Relative path template for exported files — see [Path Template](#path-template) below |
-| **Default Comments** | Comment tag written to all exported files; overridden per-track in the Comments column |
+| **Default Comments** | Comment tag embedded in all exported files; overridden per-track in the Comments column |
 | **Silence Threshold** | dB level below which audio is considered silence (first detection pass) |
 | **Min inter-track silence** | Shortest gap that registers as a track boundary (first pass; retries shorten this automatically) |
 | **Min track duration** | Regions shorter than this are discarded as noise (first pass; retries lower this automatically) |

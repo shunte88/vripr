@@ -1,6 +1,10 @@
 // Suppress the console window that would otherwise appear behind the GUI on Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod build_info {
+    include!(concat!(env!("OUT_DIR"), "/build_info.rs"));
+}
+
 mod app;
 mod audio;
 mod config;

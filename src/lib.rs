@@ -1,3 +1,7 @@
+pub mod build_info {
+    include!(concat!(env!("OUT_DIR"), "/build_info.rs"));
+}
+
 pub mod audio;
 pub mod config;
 pub mod metadata;

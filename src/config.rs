@@ -199,8 +199,6 @@ struct DefaultsSection {
     genre: String,
     #[serde(default)]
     year: String,
-    #[serde(default)]
-    audio_file: String,
     #[serde(default = "default_track_number_format")]
     track_number_format: String,
 }
@@ -213,7 +211,6 @@ impl Default for DefaultsSection {
             album_artist:        String::new(),
             genre:               String::new(),
             year:                String::new(),
-            audio_file:          String::new(),
             track_number_format: default_track_number_format(),
         }
     }
@@ -271,7 +268,6 @@ pub struct Config {
     pub default_album_artist: String,
     pub default_genre: String,
     pub default_year: String,
-    pub audio_file: String,
     pub track_number_format: TrackNumberFormat,
 }
 
@@ -306,7 +302,6 @@ impl Config {
             default_album_artist:   f.defaults.album_artist,
             default_genre:          f.defaults.genre,
             default_year:           f.defaults.year,
-            audio_file:             f.defaults.audio_file,
             track_number_format:    TrackNumberFormat::from_str(&f.defaults.track_number_format),
         }
     }
@@ -337,7 +332,6 @@ impl Config {
                 album_artist:        self.default_album_artist.clone(),
                 genre:               self.default_genre.clone(),
                 year:                self.default_year.clone(),
-                audio_file:          self.audio_file.clone(),
                 track_number_format: self.track_number_format.as_str().to_string(),
             },
         }

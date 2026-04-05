@@ -4,7 +4,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use tracing::{debug, warn};
 
-use crate::config::Config;
 
 pub struct AudacityPipe {
     pub to_path: PathBuf,
@@ -248,32 +247,6 @@ impl AudacityPipe {
         }
     }
 
-    /// Select the entire project (required before LabelSounds and similar commands).
-    pub fn select_all(&mut self) -> Result<()> {
-        self.send("SelectAll:").context("SelectAll failed")?;
-        Ok(())
-    }
-
-    /// Run LabelSounds in Audacity to detect silence-separated tracks.
-    pub fn label_sounds(&mut self, config: &Config) -> Result<()> {
-        // Remove stale label tracks so we only read fresh results.
-        self.clear_label_tracks()?;
-        self.select_all()?;
-
-        let cmd = format!(
-            "LabelSounds: threshold={} measurement=rms sil-dur={} snd-dur={} type=around pre-offset=0.1 post-offset=0.1 text=\"Track ##1\"",
-            config.silence_threshold_db,
-            config.silence_min_duration,
-            config.silence_min_sound_dur,
-        );
-        debug!("LabelSounds command: {}", cmd);
-        let (_, success) = self.send(&cmd)
-            .context("Failed to send LabelSounds command")?;
-        if !success {
-            warn!("LabelSounds command returned failure status");
-        }
-        Ok(())
-    }
 
     /// Add one label per track (title + time bounds) to Audacity.
     ///

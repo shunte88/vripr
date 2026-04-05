@@ -247,7 +247,10 @@ fn parse_tracklist(tracklist: &serde_json::Value) -> Vec<DiscogsTrack> {
 
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent("vripr/0.2.0 (https://github.com/shunte88/vripr)")
+        .user_agent(format!(
+            "vripr/{} (https://github.com/shunte88/vripr)",
+            crate::build_info::VERSION,
+        ))
         .build()
         .expect("Failed to build reqwest client — TLS backend not available")
 }

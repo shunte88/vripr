@@ -104,7 +104,11 @@ impl VriprApp {
             pipe: Arc::new(Mutex::new(AudacityPipe::new())),
             pipe_connected: false,
             is_busy: false,
-            log_messages: vec!["VRipr — Master Vinyl Rippage v0.2.0 ready.".into()],
+            log_messages: vec![format!(
+                "VRipr — Master Vinyl Rippage v{} ({}) ready.",
+                crate::build_info::VERSION,
+                crate::build_info::BUILD_DATE,
+            )],
             selected_rows: HashSet::new(),
             worker_tx,
             worker_rx,
@@ -614,33 +618,16 @@ impl VriprApp {
             let valid_durs = durations.iter().filter(|&&d| d > 0.0).count();
 
             // --- 3. Resolve audio file path ---
-            // Prefer the analysis WAV exported on connect (reflects user edits).
-            // Fall back to the config override, then to Audacity's source file.
-            let audio_path: Option<PathBuf> = {
-                if let Some(ref wav) = analysis_wav {
-                    if wav.exists() {
-                        let _ = tx.send(WorkerMessage::Log(
-                            format!("Using analysis WAV: {}", wav.display())
-                        ));
-                        Some(wav.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    let from_cfg = config.audio_file.trim().to_string();
-                    if !from_cfg.is_empty() {
-                        Some(PathBuf::from(from_cfg))
-                    } else {
-                        tokio::task::spawn_blocking(move || {
-                            pipe.lock().ok()
-                                .and_then(|mut p| p.get_audio_file_path().ok().flatten())
-                                .map(PathBuf::from)
-                        })
-                        .await
-                        .unwrap_or(None)
-                    }
-                }
-            };
+            // Use the analysis WAV exported on connect (reflects user edits).
+            let audio_path: Option<PathBuf> = analysis_wav
+                .as_ref()
+                .filter(|wav| wav.exists())
+                .map(|wav| {
+                    let _ = tx.send(WorkerMessage::Log(
+                        format!("Using analysis WAV: {}", wav.display())
+                    ));
+                    wav.clone()
+                });
 
             // --- 4. Detect actual track starts (onset walk) or fall back to synthetic ---
             let disc_refs: Vec<&crate::metadata::DiscogsTrack> = match selected_side {

@@ -4,20 +4,32 @@ use crate::config::{Config, DetectionMethod, ExportFormat, TrackNumberFormat};
 use crate::workers::export::{validate_path_template, SUPPORTED_TOKENS};
 
 pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool) {
-    let mut should_close = false;
-    let mut should_save  = false;
+    // Keep a working copy in egui temp storage so edits are only committed on Save.
+    // Cancel (or the window X button) discards the working copy without touching config.
+    let working_id = egui::Id::new("settings_working_config");
+
+    // Seed the working copy the first time the dialog opens each session.
+    let mut working: Config = ctx.data_mut(|d| {
+        d.get_temp::<Config>(working_id)
+            .unwrap_or_else(|| config.clone())
+    });
+
+    let mut should_close  = false;
+    let mut should_save   = false;
+    let mut was_shown     = false;
 
     egui::Window::new("Settings")
         .open(open)
         .resizable(true)
         .default_size([520.0, 440.0])
         .show(ctx, |ui| {
+            was_shown = true;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 egui::CollapsingHeader::new(
                     egui::RichText::new("API Keys").color(egui::Color32::from_rgb(137, 180, 250))
                 )
                 .default_open(true)
-                .show(ui, |ui| { show_api_keys_section(ui, config); });
+                .show(ui, |ui| { show_api_keys_section(ui, &mut working); });
 
                 ui.add_space(8.0);
 
@@ -25,7 +37,7 @@ pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool)
                     egui::RichText::new("Export & Detection").color(egui::Color32::from_rgb(137, 180, 250))
                 )
                 .default_open(true)
-                .show(ui, |ui| { show_export_section(ui, config); });
+                .show(ui, |ui| { show_export_section(ui, &mut working); });
 
                 ui.add_space(8.0);
 
@@ -33,7 +45,7 @@ pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool)
                     egui::RichText::new("Defaults").color(egui::Color32::from_rgb(137, 180, 250))
                 )
                 .default_open(true)
-                .show(ui, |ui| { show_defaults_section(ui, config); });
+                .show(ui, |ui| { show_defaults_section(ui, &mut working); });
 
                 ui.add_space(16.0);
 
@@ -50,12 +62,21 @@ pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool)
         });
 
     if should_save {
+        *config = working.clone();
         if let Err(e) = config.save() {
             tracing::warn!("Failed to save config: {}", e);
         }
     }
-    if should_close {
-        *open = false;
+
+    if should_close || !was_shown {
+        // Discard the working copy — next open will re-seed from current config.
+        ctx.data_mut(|d| d.remove::<Config>(working_id));
+        if should_close {
+            *open = false;
+        }
+    } else {
+        // Persist edits-in-progress across frames.
+        ctx.data_mut(|d| d.insert_temp(working_id, working));
     }
 }
 
@@ -275,19 +296,6 @@ fn show_defaults_section(ui: &mut Ui, config: &mut Config) {
 
             ui.label("Default Year:");
             ui.add(egui::TextEdit::singleline(&mut config.default_year).desired_width(80.0));
-            ui.end_row();
-
-            ui.label("Audio File Path:")
-                .on_hover_text(
-                    "Override path to the source audio file. Leave blank to use the \
-                     analysis WAV exported automatically on connect, or the file \
-                     currently open in Audacity.",
-                );
-            ui.add(
-                egui::TextEdit::singleline(&mut config.audio_file)
-                    .desired_width(310.0)
-                    .hint_text("Leave blank — auto-detected on connect"),
-            );
             ui.end_row();
 
             ui.label("Track Number Format:");
