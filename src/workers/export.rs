@@ -6,6 +6,138 @@ use crate::tagging::write_tags;
 use crate::track::TrackMeta;
 use crate::workers::{AppSender, TrackUpdate, WorkerMessage};
 
+// ---------------------------------------------------------------------------
+// Path template validation (used by the settings dialog for live feedback)
+// ---------------------------------------------------------------------------
+
+/// All token names recognised by `apply_path_template`.
+pub const SUPPORTED_TOKENS: &[&str] = &[
+    "title", "artist", "album", "album_artist", "genre", "year",
+    "tracknum", "composer", "country", "country_iso", "catalog", "label", "discogs_id",
+];
+
+/// A single unknown token found during template validation.
+#[derive(Debug, Clone)]
+pub struct TemplateTokenError {
+    /// The token name as written (without braces).
+    pub token:      String,
+    /// Best-guess replacement, if one could be found.
+    pub suggestion: Option<String>,
+}
+
+/// Parse `template`, return one error per unknown `{token}`.
+/// Unclosed braces are ignored (not an error).
+pub fn validate_path_template(template: &str) -> Vec<TemplateTokenError> {
+    let mut errors = Vec::new();
+    let mut s = template;
+    while let Some(open) = s.find('{') {
+        s = &s[open + 1..];
+        let Some(close) = s.find('}') else { break };
+        let token = &s[..close];
+        s = &s[close + 1..];
+        if !token.is_empty() && !SUPPORTED_TOKENS.contains(&token) {
+            errors.push(TemplateTokenError {
+                token:      token.to_string(),
+                suggestion: suggest_token(token),
+            });
+        }
+    }
+    errors
+}
+
+/// Return the best supported-token suggestion for an unknown token, or `None`.
+fn suggest_token(unknown: &str) -> Option<String> {
+    // 1. Explicit alias table — most common typos / alternate naming conventions
+    let aliases: &[(&str, &str)] = &[
+        ("track",            "tracknum"),
+        ("track_number",     "tracknum"),
+        ("track_no",         "tracknum"),
+        ("trackno",          "tracknum"),
+        ("track_num",        "tracknum"),
+        ("number",           "tracknum"),
+        ("num",              "tracknum"),
+        ("album_name",       "album"),
+        ("album_title",      "album"),
+        ("record",           "album"),
+        ("country_code",     "country_iso"),
+        ("iso",              "country_iso"),
+        ("iso_country",      "country_iso"),
+        ("catno",            "catalog"),
+        ("cat_no",           "catalog"),
+        ("catalog_number",   "catalog"),
+        ("catalogue",        "catalog"),
+        ("catalogue_number", "catalog"),
+        ("catalog_no",       "catalog"),
+        ("release_id",       "discogs_id"),
+        ("discogs",          "discogs_id"),
+        ("discogs_release",  "discogs_id"),
+        ("album_artist_name","album_artist"),
+    ];
+    for &(alias, target) in aliases {
+        if unknown.eq_ignore_ascii_case(alias) {
+            return Some(target.to_string());
+        }
+    }
+
+    // 2. Normalization: strip underscores and compare lowercase
+    let unknown_norm: String = unknown.chars().filter(|&c| c != '_').collect::<String>().to_lowercase();
+    for &sup in SUPPORTED_TOKENS {
+        let sup_norm: String = sup.chars().filter(|&c| c != '_').collect::<String>();
+        if sup_norm == unknown_norm {
+            return Some(sup.to_string());
+        }
+    }
+
+    // 3. Prefix match: unknown is a prefix of a supported token (≥ 3 chars)
+    if unknown.len() >= 3 {
+        for &sup in SUPPORTED_TOKENS {
+            if sup.starts_with(unknown) {
+                return Some(sup.to_string());
+            }
+        }
+    }
+
+    // 4. Containment: a supported token (≥ 4 chars) appears inside the unknown string
+    for &sup in SUPPORTED_TOKENS {
+        if sup.len() >= 4 && unknown.contains(sup) {
+            return Some(sup.to_string());
+        }
+    }
+
+    // 5. Levenshtein: accept if distance ≤ max(2, shorter_length / 3)
+    let (best, dist) = SUPPORTED_TOKENS
+        .iter()
+        .map(|&s| (s, levenshtein(unknown, s)))
+        .min_by_key(|&(_, d)| d)?;
+    let threshold = 2.max(unknown.len().min(best.len()) / 3);
+    if dist <= threshold {
+        Some(best.to_string())
+    } else {
+        None
+    }
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m { dp[i][0] = i; }
+    for j in 0..=n { dp[0][j] = j; }
+    for i in 1..=m {
+        for j in 1..=n {
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1]
+            } else {
+                1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
+            };
+        }
+    }
+    dp[m][n]
+}
+
+// ---------------------------------------------------------------------------
+
 fn sanitize_filename(s: &str) -> String {
     if s.is_empty() {
         return "Unknown".to_string();
@@ -16,6 +148,127 @@ fn sanitize_filename(s: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+/// Map a Discogs country name to its ISO 3166-1 alpha-2 code.
+/// Returns the original string if no mapping is found (already a code, or unusual name).
+fn country_to_iso(country: &str) -> &str {
+    match country.trim() {
+        "UK"                   => "GB",
+        "US"                   => "US",
+        "Germany"              => "DE",
+        "France"               => "FR",
+        "Japan"                => "JP",
+        "Italy"                => "IT",
+        "Netherlands"          => "NL",
+        "Australia"            => "AU",
+        "Canada"               => "CA",
+        "Spain"                => "ES",
+        "Brazil"               => "BR",
+        "Belgium"              => "BE",
+        "Sweden"               => "SE",
+        "Norway"               => "NO",
+        "Denmark"              => "DK",
+        "Finland"              => "FI",
+        "Switzerland"          => "CH",
+        "Austria"              => "AT",
+        "New Zealand"          => "NZ",
+        "South Africa"         => "ZA",
+        "Mexico"               => "MX",
+        "Argentina"            => "AR",
+        "Portugal"             => "PT",
+        "Greece"               => "GR",
+        "Poland"               => "PL",
+        "Czech Republic"       => "CZ",
+        "Hungary"              => "HU",
+        "Romania"              => "RO",
+        "Bulgaria"             => "BG",
+        "Russia"               => "RU",
+        "Yugoslavia"           => "YU",
+        "India"                => "IN",
+        "South Korea"          => "KR",
+        "Taiwan"               => "TW",
+        "Hong Kong"            => "HK",
+        "Israel"               => "IL",
+        "Turkey"               => "TR",
+        "Venezuela"            => "VE",
+        "Colombia"             => "CO",
+        "Chile"                => "CL",
+        "Uruguay"              => "UY",
+        "Ireland"              => "IE",
+        "Iceland"              => "IS",
+        other                  => other,
+    }
+}
+
+/// Remove `[...]` groups whose interior is empty or whitespace-only.
+/// Iterates until no more can be collapsed (handles adjacent groups like `[][]`).
+fn collapse_empty_brackets(s: &str) -> String {
+    let mut result = s.to_string();
+    loop {
+        let mut changed = false;
+        let bytes = result.as_bytes();
+        if let Some(open) = bytes.iter().position(|&b| b == b'[') {
+            if let Some(rel_close) = bytes[open + 1..].iter().position(|&b| b == b']') {
+                let close = open + 1 + rel_close;
+                let inner = &result[open + 1..close];
+                if inner.trim().is_empty() {
+                    result = format!("{}{}", &result[..open], &result[close + 1..]);
+                    changed = true;
+                }
+            }
+        }
+        if !changed { break; }
+    }
+    result
+}
+
+/// Expand a path template using per-track metadata tokens, returning a relative
+/// `PathBuf` (without extension). Path components are split on `/`, each segment
+/// is sanitised. Empty bracket groups are collapsed before splitting.
+///
+/// Supported tokens:
+///   `{title}`, `{artist}`, `{album}`, `{album_artist}`, `{genre}`, `{year}`,
+///   `{tracknum}`, `{composer}`, `{country}`, `{catalog}`, `{label}`, `{discogs_id}`
+fn apply_path_template(template: &str, track: &TrackMeta) -> std::path::PathBuf {
+    let tracknum = if track.track_number.is_empty() {
+        "00".to_string()
+    } else {
+        track.track_number.parse::<u32>()
+            .map(|n| format!("{:02}", n))
+            .unwrap_or_else(|_| track.track_number.clone())
+    };
+
+    let mut s = template.to_string();
+    s = s.replace("{title}",        &track.title);
+    s = s.replace("{artist}",       &track.artist);
+    s = s.replace("{album}",        &track.album);
+    s = s.replace("{album_artist}", &track.album_artist);
+    s = s.replace("{genre}",        &track.genre);
+    s = s.replace("{year}",         &track.year);
+    s = s.replace("{tracknum}",     &tracknum);
+    s = s.replace("{composer}",     &track.composer);
+    s = s.replace("{country}",      &track.country);
+    s = s.replace("{country_iso}",  country_to_iso(&track.country));
+    s = s.replace("{catalog}",      &track.catalog);
+    s = s.replace("{label}",        &track.label);
+    s = s.replace("{discogs_id}",   &track.discogs_release_id);
+
+    let s = collapse_empty_brackets(&s);
+
+    let mut path = std::path::PathBuf::new();
+    for segment in s.split('/') {
+        let seg = segment.trim();
+        if seg.is_empty() { continue; }
+        path.push(sanitize_filename(seg));
+    }
+
+    // Ensure we always have at least one segment
+    if path.as_os_str().is_empty() {
+        path.push(format!("{} - Unknown", tracknum));
+    }
+
+    path
 }
 
 pub async fn run_export_worker(
@@ -88,23 +341,17 @@ pub async fn run_export_worker(
     for (i, track) in tracks.iter().enumerate() {
         let ext = config.export_format.extension();
 
-        // Build output path: {export_dir}/{artist}/{album}/{NN} - {title}.{ext}
-        let artist_dir  = sanitize_filename(&track.artist);
-        let album_dir   = sanitize_filename(&track.album);
-        let num = if track.track_number.is_empty() {
-            "00".to_string()
-        } else {
-            track.track_number.parse::<u32>()
-                .map(|n| format!("{:02}", n))
-                .unwrap_or_else(|_| track.track_number.clone())
+        // Build output path from configurable template
+        let rel = apply_path_template(&config.export_path_template, track);
+        // Append extension to the final filename component
+        let out_path = {
+            let mut p = config.export_dir.join(&rel);
+            let stem = p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "track".to_string());
+            p.set_file_name(format!("{}.{}", stem, ext));
+            p
         };
-        let title_safe = sanitize_filename(&track.title);
-        let filename   = format!("{} - {}.{}", num, title_safe, ext);
-
-        let out_path = config.export_dir
-            .join(&artist_dir)
-            .join(&album_dir)
-            .join(&filename);
 
         // Create parent directories
         if let Some(parent) = out_path.parent() {
@@ -162,7 +409,12 @@ pub async fn run_export_worker(
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
         if out_path.exists() {
-            if let Err(e) = write_tags(&out_path, track) {
+            let effective_comments = if track.comments.is_empty() {
+                &config.default_comments
+            } else {
+                &track.comments
+            };
+            if let Err(e) = write_tags(&out_path, track, effective_comments) {
                 let _ = tx.send(WorkerMessage::Log(format!(
                     "  Track {}: tagging warning: {}", track.index, e
                 )));

@@ -2,7 +2,7 @@
   <img src="assets/vripr.webp" alt="VRipr logo" width="160"/>
 </p>
 
-<h1 align="center">VRipr — Vinyl Ripper Helper</h1>
+<h1 align="center">VRipr — Master Vinyl Rippage</h1>
 
 <p align="center">
   A desktop companion for digitising vinyl records via Audacity — silence detection, Discogs metadata, waveform editing, and one-click tagged export.
@@ -101,7 +101,7 @@ sudo install -Dm755 target/release/vripr /usr/local/bin/vripr
 cat > ~/.local/share/applications/vripr.desktop <<EOF
 [Desktop Entry]
 Name=VRipr
-Comment=Vinyl Ripper Helper
+Comment=Master Vinyl Rippage
 Exec=vripr
 Icon=/path/to/assets/vripr.webp
 Type=Application
@@ -119,7 +119,9 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 |---|---|
 | **Discogs Token** | Personal access token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
 | **Export Format** | FLAC (default), MP3, WAV, OGG |
-| **Export Directory** | Root output folder; tracks are written to `{dir}/{Artist}/{Album}/{NN} - {Title}.{ext}` |
+| **Export Directory** | Root output folder; the template is joined to this path |
+| **Path Template** | Relative path template for exported files — see [Path Template](#path-template) below |
+| **Default Comments** | Comment tag written to all exported files; overridden per-track in the Comments column |
 | **Silence Threshold** | dB level below which audio is considered silence (first detection pass) |
 | **Min inter-track silence** | Shortest gap that registers as a track boundary (first pass; retries shorten this automatically) |
 | **Min track duration** | Regions shorter than this are discarded as noise (first pass; retries lower this automatically) |
@@ -153,6 +155,29 @@ The waveform panel shows coloured regions for each detected track. If any bounda
 - **Drag empty space** to draw a selection, then click **➕ Add Track** to insert a new track at exactly that position.
 - Click **🔄 Re-scan** to run detection again while keeping pinned tracks.
 
+### Processing sides separately (the prescribed workflow)
+
+> **One side per Audacity session is strongly recommended.** The silence detector works on whatever audio is loaded — if you record multiple sides as a single continuous file, it must find twice (or four times) as many tracks with no knowledge of where the physical side-break is. Detection reliability drops significantly above ~6 tracks. For double albums, triple albums, and boxed sets, processing one side per session is not just a suggestion — it is effectively required for consistent results.
+
+The **Side:** selector in the toolbar handles the metadata side of this workflow. It appears automatically when the loaded Discogs release has more than one vinyl side. For double albums (4 sides) and above it groups sides into discs — *Disc 1 / Side A*, *Disc 1 / Side B*, *Disc 2 / Side C* — so you always know which disc a side belongs to.
+
+**Workflow for a double album (4 sides, 2 discs):**
+
+1. Record Disc 1 Side A into Audacity. Connect → detect → select **Side A (Disc 1)** → export. Done for Side A.
+2. New Audacity session. Record Disc 1 Side B. Connect → detect → select **Side B (Disc 1)** → export.
+3. Repeat for Disc 2 Sides C and D.
+
+**Ripping out of order** (e.g., Side B before Side A):
+
+1. Load your Side B recording and connect.
+2. Fetch the release. Select **Side B** from the combo.
+3. VRipr filters the Discogs tracklist to Side B only and calibrates the retry loop against that side's track count.
+4. If you change the side selection after detection has already run, VRipr immediately re-assigns Discogs metadata to the existing detected boundaries without re-running audio analysis. Click **🔄 Re-scan** to redo detection calibrated to the new side's expected count.
+
+Track numbers are assigned from the Discogs vinyl position (`B1`, `B2`, …) regardless of the order you rip, so exported files sort correctly in your library.
+
+> **What the Side selector does not do**: it does not make multi-side audio easier to analyse. If you've recorded Sides A and B as one 90-minute file, selecting "Side A" only filters the *metadata* — the detector still has to find all the tracks in 90 minutes of audio. Record one side at a time.
+
 ### 5. Set labels in Audacity
 
 Click **🏷 Set Labels**. VRipr clears any existing label track in Audacity, writes new labels from the track table, then reads them back to confirm they took. Switch to Audacity for a final visual check — drag labels if needed.
@@ -166,16 +191,60 @@ Click **💾 Export All**. VRipr:
 - Writes full ID3/Vorbis/FLAC tags including `DISCOGS_RELEASEID`
 - Deposits `folder.jpg` in the album directory after the first track completes
 
-Output structure:
+Output structure follows your Path Template. The default template produces:
+
 ```
 {Export Directory}/
-  {Artist}/
+  {Album Artist}/
     {Album}/
       folder.jpg
       01 - Track Title.flac
       02 - Track Title.flac
       …
 ```
+
+---
+
+## Path Template
+
+The **Path Template** setting (under Export & Detection in Settings) controls where each exported file is placed relative to the Export Directory.
+
+### Tokens
+
+| Token | Value |
+|---|---|
+| `{title}` | Track title |
+| `{artist}` | Track artist (defaults to Album Artist) |
+| `{album}` | Album title |
+| `{album_artist}` | Album-level artist |
+| `{genre}` | Genre |
+| `{year}` | Release year |
+| `{tracknum}` | Zero-padded track number (e.g. `01`, `A1`, `B2`) |
+| `{composer}` | Composer |
+| `{country}` | Release country as Discogs names it (e.g. `UK`, `Germany`) |
+| `{country_iso}` | Release country as ISO 3166-1 alpha-2 (e.g. `GB`, `DE`) |
+| `{catalog}` | Label catalogue number (from Discogs) |
+| `{label}` | Record label (from Discogs) |
+| `{discogs_id}` | Discogs release ID |
+
+### Bracket collapsing
+
+Wrap tokens in `[...]` to make them conditional: if the token resolves to an empty string, the entire `[...]` group (including brackets) is removed. This avoids orphaned `[]` in directory names when metadata is missing.
+
+### Examples
+
+Default:
+```
+{album_artist}/{album}/{tracknum} - {title}
+```
+
+With ISO country code and catalogue number:
+```
+{album_artist}/{album} [{country_iso}][{catalog}]/{tracknum} - {title}
+```
+→ `Miles Davis/Kind of Blue [US][CL 1355]/01 - So What.flac`
+→ (if country is empty) `Miles Davis/Kind of Blue [CL 1355]/01 - So What.flac`
+→ UK release: `Miles Davis/Kind of Blue [GB][CL 1355]/01 - So What.flac`
 
 ---
 

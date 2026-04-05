@@ -1,6 +1,7 @@
 # Build output
 /target
 
+nextsess
 # Cargo lock (keep for binaries, discard for libraries — this is a binary)
 # Cargo.lock
 

@@ -45,6 +45,8 @@ pub struct DiscogsRelease {
     pub year: String,
     pub genre: String,
     pub label: String,
+    pub country: String,
+    pub catalog: String,
     /// Primary cover art URL (thumbnail, ~150px), if available.
     pub cover_image_url: Option<String>,
     /// All tracks ordered as they appear on the release.
@@ -540,6 +542,14 @@ fn release_from_json(json: &serde_json::Value, release_id: &str) -> DiscogsRelea
         .unwrap_or("")
         .to_string();
 
+    let country = json["country"].as_str().unwrap_or("").to_string();
+
+    let catalog = json["labels"].as_array()
+        .and_then(|l| l.first())
+        .and_then(|l| l["catno"].as_str())
+        .unwrap_or("")
+        .to_string();
+
     let tracks = parse_tracklist(&json["tracklist"]);
 
     // Prefer the 150px thumbnail; fall back to the full URI.
@@ -569,6 +579,8 @@ fn release_from_json(json: &serde_json::Value, release_id: &str) -> DiscogsRelea
         year,
         genre,
         label,
+        country,
+        catalog,
         cover_image_url,
         tracks,
     }

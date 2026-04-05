@@ -55,6 +55,10 @@ pub struct VriprApp {
 
     // Fetched Discogs release (for duration-based splitting)
     pub discogs_release: Option<DiscogsRelease>,
+    /// Vinyl sides present in the current release (e.g. ['A','B']). Empty = no release.
+    pub available_sides: Vec<char>,
+    /// Filter processing to a single vinyl side. None = all sides (normal full-album workflow).
+    pub selected_side: Option<char>,
 
     // Discogs candidate picker
     pub discogs_candidates: Vec<DiscogsCandidate>,
@@ -100,7 +104,7 @@ impl VriprApp {
             pipe: Arc::new(Mutex::new(AudacityPipe::new())),
             pipe_connected: false,
             is_busy: false,
-            log_messages: vec!["Vinyl Ripper Helper v0.2.0 ready.".into()],
+            log_messages: vec!["VRipr — Master Vinyl Rippage v0.2.0 ready.".into()],
             selected_rows: HashSet::new(),
             worker_tx,
             worker_rx,
@@ -115,6 +119,8 @@ impl VriprApp {
             apply_year: String::new(),
             progress: None,
             discogs_release: None,
+            available_sides: Vec::new(),
+            selected_side: None,
             discogs_candidates: Vec::new(),
             discogs_picker_open: false,
             discogs_picker_token: String::new(),
@@ -205,6 +211,8 @@ impl VriprApp {
                             side, side_tracks.len(), dur_str
                         ));
                     }
+                    self.available_sides = release.sides();
+                    self.selected_side   = None; // reset to "All" on each new release
                     self.is_busy = false;
                     self.discogs_release = Some(release);
                 }
@@ -555,6 +563,7 @@ impl VriprApp {
         let config       = self.config.clone();
         let pipe         = self.pipe.clone();
         let analysis_wav = self.analysis_wav.clone();
+        let selected_side = self.selected_side;
 
         self.is_busy = true;
         self.log_messages.push(format!(
@@ -634,7 +643,15 @@ impl VriprApp {
             };
 
             // --- 4. Detect actual track starts (onset walk) or fall back to synthetic ---
-            let disc_refs: Vec<&crate::metadata::DiscogsTrack> = release.tracks.iter().collect();
+            let disc_refs: Vec<&crate::metadata::DiscogsTrack> = match selected_side {
+                None    => release.tracks.iter().collect(),
+                Some(s) => {
+                    let _ = tx.send(WorkerMessage::Log(
+                        format!("Side filter active: processing Side {} only.", s)
+                    ));
+                    release.tracks.iter().filter(|t| t.side == s).collect()
+                }
+            };
 
             let tracks: Vec<TrackMeta> = if valid_durs == 0 {
                 let _ = tx.send(WorkerMessage::Log(
@@ -648,6 +665,16 @@ impl VriprApp {
                 ));
 
                 let expected = disc_refs.len();
+
+                // Warn if expecting many tracks — one-side-per-session is strongly recommended
+                if expected > 8 {
+                    let _ = tx.send(WorkerMessage::Log(format!(
+                        "⚠  Expecting {} tracks — detection is most reliable with one vinyl \
+                         side per session (≤6 tracks). Consider recording one side at a time \
+                         and using the Side selector for metadata assignment.",
+                        expected
+                    )));
+                }
 
                 // Retry schedule: progressively shorter silence thresholds.
                 // IMPORTANT: gap_fill must always be < min_silence or it will
@@ -765,6 +792,9 @@ impl VriprApp {
                             year:               release.year.clone(),
                             genre:              release.genre.clone(),
                             discogs_release_id: release.release_id.clone(),
+                            country:            release.country.clone(),
+                            catalog:            release.catalog.clone(),
+                            label:              release.label.clone(),
                             ..Default::default()
                         }
                     }).collect()
@@ -814,6 +844,36 @@ impl VriprApp {
                 self.tracks.len().min(disc_refs.len())
             ));
         }
+    }
+
+    /// Apply a vinyl side filter — re-assigns Discogs metadata to detected tracks
+    /// without re-running audio detection. Useful when ripping sides out of order.
+    fn apply_side_filter(&mut self, side: Option<char>) {
+        self.selected_side = side;
+        let label = side.map_or_else(|| "All sides".to_string(), |s| format!("Side {}", s));
+
+        let Some(release) = &self.discogs_release else {
+            self.log_messages.push(format!("Side → {} (no release loaded; fetch a release first)", label));
+            return;
+        };
+
+        let disc_refs: Vec<&crate::metadata::DiscogsTrack> = match side {
+            None    => release.tracks.iter().collect(),
+            Some(s) => release.tracks.iter().filter(|t| t.side == s).collect(),
+        };
+
+        if disc_refs.is_empty() {
+            self.log_messages.push(format!("Side {}: no tracks found in release", side.unwrap_or('?')));
+            return;
+        }
+
+        crate::metadata::assign_discogs_titles(&mut self.tracks, &disc_refs, release);
+        self.log_messages.push(format!(
+            "Side filter → {} — reassigned metadata for {} track(s) from {} Discogs track(s).",
+            label,
+            self.tracks.len().min(disc_refs.len()),
+            disc_refs.len(),
+        ));
     }
 
     fn rescan(&mut self, ctx: egui::Context) {
@@ -934,6 +994,9 @@ impl VriprApp {
                         year:              meta.map(|t| t.year.clone()).unwrap_or_default(),
                         genre:             meta.map(|t| t.genre.clone()).unwrap_or_default(),
                         discogs_release_id: meta.map(|t| t.discogs_release_id.clone()).unwrap_or_default(),
+                        country:           meta.map(|t| t.country.clone()).unwrap_or_default(),
+                        catalog:           meta.map(|t| t.catalog.clone()).unwrap_or_default(),
+                        label:             meta.map(|t| t.label.clone()).unwrap_or_default(),
                         pinned: false,
                         ..Default::default()
                     });
@@ -1071,6 +1134,8 @@ impl VriprApp {
                 has_selection: !self.selected_rows.is_empty(),
                 has_discogs_release: self.discogs_release.is_some(),
                 has_analysis_wav: self.analysis_wav.as_ref().map(|p| p.exists()).unwrap_or(false),
+                available_sides: self.available_sides.clone(),
+                selected_side: self.selected_side,
             };
 
             let actions = show_toolbar(ui, &state);
@@ -1100,6 +1165,7 @@ impl VriprApp {
                         self.log_messages.push("Tracks cleared.".into());
                     }
                     ToolbarAction::FetchDiscogsRelease => self.fetch_discogs_release(ctx.clone()),
+                    ToolbarAction::SideChanged(side)  => self.apply_side_filter(side),
                 }
             }
         });

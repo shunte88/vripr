@@ -13,8 +13,13 @@ pub struct TrackMeta {
     pub track_number: String,
     pub year: String,
     pub acoustid: String,
+    pub composer: String,
+    pub comments: String,
     pub mb_recording_id: String,
     pub discogs_release_id: String,
+    pub country: String,
+    pub catalog: String,
+    pub label: String,
     pub fingerprint_done: bool,
     pub export_path: Option<PathBuf>,
     /// User has manually anchored this track — re-scan will preserve its boundaries.

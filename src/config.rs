@@ -107,13 +107,19 @@ struct ExportSection {
     format: String,
     #[serde(default = "default_export_dir_str")]
     dir: String,
+    #[serde(default = "default_path_template")]
+    path_template: String,
+    #[serde(default)]
+    default_comments: String,
 }
 
 impl Default for ExportSection {
     fn default() -> Self {
         Self {
-            format: default_format(),
-            dir: default_export_dir_str(),
+            format:           default_format(),
+            dir:              default_export_dir_str(),
+            path_template:    default_path_template(),
+            default_comments: String::new(),
         }
     }
 }
@@ -183,6 +189,9 @@ impl Default for DefaultsSection {
 fn default_track_number_format() -> String { "alpha".to_string() }
 
 fn default_format()       -> String { "flac".to_string() }
+fn default_path_template() -> String {
+    "{album_artist}/{album}/{tracknum} - {title}".to_string()
+}
 fn default_threshold_db() -> f64    { -40.0 }
 fn default_min_duration() -> f64    { 1.5 }
 fn default_min_sound_dur() -> f64   { 3.0 }
@@ -209,6 +218,8 @@ pub struct Config {
     pub discogs_token: String,
     pub export_format: ExportFormat,
     pub export_dir: PathBuf,
+    pub export_path_template: String,
+    pub default_comments: String,
     pub silence_threshold_db: f64,
     pub silence_min_duration: f64,
     pub silence_min_sound_dur: f64,
@@ -240,6 +251,8 @@ impl Config {
             discogs_token:        f.api.discogs_token,
             export_format:        ExportFormat::from_str(&f.export.format),
             export_dir:           PathBuf::from(&f.export.dir),
+            export_path_template: f.export.path_template,
+            default_comments:     f.export.default_comments,
             silence_threshold_db: f.silence.threshold_db,
             silence_min_duration: f.silence.min_duration,
             silence_min_sound_dur: f.silence.min_sound_dur,
@@ -261,8 +274,10 @@ impl Config {
                 discogs_token: self.discogs_token.clone(),
             },
             export: ExportSection {
-                format: self.export_format.as_str().to_string(),
-                dir:    self.export_dir.to_string_lossy().into_owned(),
+                format:           self.export_format.as_str().to_string(),
+                dir:              self.export_dir.to_string_lossy().into_owned(),
+                path_template:    self.export_path_template.clone(),
+                default_comments: self.default_comments.clone(),
             },
             silence: SilenceSection {
                 threshold_db:       self.silence_threshold_db,

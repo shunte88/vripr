@@ -8,6 +8,10 @@ pub struct ToolbarState {
     pub has_selection: bool,
     pub has_discogs_release: bool,
     pub has_analysis_wav: bool,
+    /// Vinyl sides present in the loaded release (e.g. ['A','B']). Empty = no release loaded.
+    pub available_sides: Vec<char>,
+    /// Currently selected side filter. None = all sides (default).
+    pub selected_side: Option<char>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +28,8 @@ pub enum ToolbarAction {
     ClearTracks,
     FetchDiscogsRelease,
     Rescan,
+    /// User changed the active vinyl side filter.
+    SideChanged(Option<char>),
 }
 
 pub fn show_toolbar(ui: &mut Ui, state: &ToolbarState) -> Vec<ToolbarAction> {
@@ -70,6 +76,84 @@ pub fn show_toolbar(ui: &mut Ui, state: &ToolbarState) -> Vec<ToolbarAction> {
             if btn.clicked() {
                 actions.push(ToolbarAction::Rescan);
             }
+        }
+
+        // Side selector — only shown when the loaded release has more than one vinyl side
+        if state.available_sides.len() > 1 {
+            ui.separator();
+
+            let multi_disc = state.available_sides.len() > 2;
+            let hover = if multi_disc {
+                "Filter processing to a single vinyl side.\n\
+                 \n\
+                 ⚠ IMPORTANT — process one side per Audacity session.\n\
+                 The silence detector works against whatever audio is currently\n\
+                 loaded. Recording multiple sides as one continuous file makes\n\
+                 detection much harder and unreliable for >1 disc recordings.\n\
+                 \n\
+                 Workflow: record Side A → detect → export → record Side B → …\n\
+                 Use this selector to assign the correct side's metadata."
+            } else {
+                "Filter processing to a single vinyl side.\n\
+                 \n\
+                 ⚠ Process one side per Audacity session — record Side A, detect\n\
+                 and export, then flip and record Side B as a separate session.\n\
+                 This selector assigns the correct side's metadata; it does not\n\
+                 make multi-side detection more reliable."
+            };
+
+            ui.label("Side:").on_hover_text(hover);
+
+            // Compute display label including disc number for multi-disc releases
+            let side_label = match state.selected_side {
+                None => "All".to_string(),
+                Some(s) => {
+                    if multi_disc {
+                        let disc = disc_for_side(&state.available_sides, s);
+                        format!("Side {} (Disc {})", s, disc)
+                    } else {
+                        format!("Side {}", s)
+                    }
+                }
+            };
+
+            let mut sel = state.selected_side;
+            egui::ComboBox::from_id_source("side_selector")
+                .selected_text(side_label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_value(&mut sel, None, "All sides").changed() {
+                        actions.push(ToolbarAction::SideChanged(None));
+                    }
+                    if multi_disc {
+                        // Group sides into discs (2 sides per vinyl disc)
+                        for (disc_idx, chunk) in state.available_sides.chunks(2).enumerate() {
+                            ui.separator();
+                            ui.add_enabled(
+                                false,
+                                egui::Label::new(
+                                    egui::RichText::new(format!("Disc {}", disc_idx + 1))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(137, 180, 250)),
+                                ),
+                            );
+                            for &s in chunk {
+                                if ui.selectable_value(
+                                    &mut sel,
+                                    Some(s),
+                                    format!("  Side {}", s),
+                                ).changed() {
+                                    actions.push(ToolbarAction::SideChanged(Some(s)));
+                                }
+                            }
+                        }
+                    } else {
+                        for &s in &state.available_sides {
+                            if ui.selectable_value(&mut sel, Some(s), format!("Side {}", s)).changed() {
+                                actions.push(ToolbarAction::SideChanged(Some(s)));
+                            }
+                        }
+                    }
+                });
         }
 
         // Fetch Discogs release + guided detection
@@ -162,4 +246,11 @@ pub fn show_toolbar(ui: &mut Ui, state: &ToolbarState) -> Vec<ToolbarAction> {
     });
 
     actions
+}
+
+/// Return the 1-based disc number for a side, assuming 2 sides per vinyl disc.
+/// `available_sides` must be in the order they appear on the release.
+fn disc_for_side(available_sides: &[char], side: char) -> usize {
+    let pos = available_sides.iter().position(|&s| s == side).unwrap_or(0);
+    pos / 2 + 1
 }

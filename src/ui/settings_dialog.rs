@@ -1,6 +1,7 @@
 use egui::{Context, Ui};
 
 use crate::config::{Config, ExportFormat, TrackNumberFormat};
+use crate::workers::export::{validate_path_template, SUPPORTED_TOKENS};
 
 pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool) {
     let mut should_close = false;
@@ -107,6 +108,73 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
             ).changed() {
                 config.export_dir = std::path::PathBuf::from(&dir_str);
             }
+            ui.end_row();
+
+            ui.label("Path Template:")
+                .on_hover_text(
+                    "Relative path template for exported files (no extension).\n\
+                     Tokens: {title} {artist} {album} {album_artist} {genre} {year}\n\
+                     {tracknum} {composer} {country} {country_iso} {catalog} {label} {discogs_id}\n\
+                     {country_iso} converts 'UK'→'GB', 'Germany'→'DE' etc.\n\
+                     Bracket groups like [{country_iso}] are removed when the token is empty.\n\
+                     Example: {album_artist}/{album} [{country_iso}][{catalog}]/{tracknum} - {title}"
+                );
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut config.export_path_template)
+                        .desired_width(400.0)
+                        .hint_text("{album_artist}/{album}/{tracknum} - {title}"),
+                );
+                // Live validation feedback
+                if config.export_path_template.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(166, 173, 200),
+                        format!(
+                            "Tokens: {}",
+                            SUPPORTED_TOKENS
+                                .iter()
+                                .map(|t| format!("{{{}}}", t))
+                                .collect::<Vec<_>>()
+                                .join("  ")
+                        ),
+                    );
+                } else {
+                    let errors = validate_path_template(&config.export_path_template);
+                    if errors.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(166, 227, 161),
+                            "✓ All tokens recognised",
+                        );
+                    } else {
+                        for err in &errors {
+                            let msg = match &err.suggestion {
+                                Some(s) => format!(
+                                    "  ✗  Unknown token {{{0}}} — did you mean {{{1}}}?",
+                                    err.token, s
+                                ),
+                                None => format!(
+                                    "  ✗  Unknown token {{{0}}}",
+                                    err.token
+                                ),
+                            };
+                            ui.colored_label(egui::Color32::from_rgb(243, 139, 168), msg);
+                        }
+                    }
+                }
+            });
+            ui.end_row();
+
+            ui.label("Default Comments:")
+                .on_hover_text(
+                    "Written as the Comment tag on every exported file.\n\
+                     Override per-track in the track grid Comments column.\n\
+                     Leave blank for no comment tag."
+                );
+            ui.add(
+                egui::TextEdit::singleline(&mut config.default_comments)
+                    .desired_width(310.0)
+                    .hint_text("e.g. Ripped from vinyl"),
+            );
             ui.end_row();
 
             // --- Detection ---

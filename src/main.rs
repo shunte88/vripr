@@ -1,3 +1,6 @@
+// Suppress the console window that would otherwise appear behind the GUI on Windows.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod audio;
 mod config;
@@ -21,7 +24,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Vinyl Ripper Helper")
+            .with_title("VRipr - Master Vinyl Rippage")
             .with_inner_size([1100.0, 680.0])
             .with_min_inner_size([900.0, 500.0]),
         ..Default::default()
@@ -29,7 +32,7 @@ fn main() -> eframe::Result<()> {
 
     let rt_clone = rt.clone();
     eframe::run_native(
-        "Vinyl Ripper Helper",
+        "VRipr - Master Vinyl Rippage",
         options,
         Box::new(move |cc| Ok(Box::new(VriprApp::new(cc, rt_clone)))),
     )

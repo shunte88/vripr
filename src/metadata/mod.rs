@@ -109,6 +109,9 @@ pub fn assign_discogs_titles(
         track.year               = release.year.clone();
         track.genre              = release.genre.clone();
         track.discogs_release_id = release.release_id.clone();
+        track.country            = release.country.clone();
+        track.catalog            = release.catalog.clone();
+        track.label              = release.label.clone();
     }
 }
 
@@ -159,6 +162,9 @@ pub fn split_by_discogs_durations_fmt(
             year:            release.year.clone(),
             genre:           release.genre.clone(),
             discogs_release_id: release.release_id.clone(),
+            country:         release.country.clone(),
+            catalog:         release.catalog.clone(),
+            label:           release.label.clone(),
             ..Default::default()
         };
         pos += dur + gap_secs;

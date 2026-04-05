@@ -6,7 +6,11 @@ use tracing::{debug, warn};
 
 use crate::track::TrackMeta;
 
-pub fn write_tags(filepath: &Path, track: &TrackMeta) -> Result<()> {
+/// Write all metadata tags to an exported audio file.
+///
+/// `effective_comments` is the comment to embed — callers should resolve
+/// this as: `track.comments` if non-empty, else `config.default_comments`.
+pub fn write_tags(filepath: &Path, track: &TrackMeta, effective_comments: &str) -> Result<()> {
     debug!("Writing tags to {:?}", filepath);
 
     let mut tagged_file = Probe::open(filepath)
@@ -60,6 +64,26 @@ pub fn write_tags(filepath: &Path, track: &TrackMeta) -> Result<()> {
         if let Ok(y) = track.year.parse::<u32>() {
             tag.set_year(y);
         }
+    }
+    if !track.composer.is_empty() {
+        use lofty::tag::ItemKey;
+        tag.insert_text(ItemKey::Composer, track.composer.clone());
+    }
+    if !effective_comments.is_empty() {
+        use lofty::tag::ItemKey;
+        tag.insert_text(ItemKey::Comment, effective_comments.to_string());
+    }
+    if !track.country.is_empty() {
+        use lofty::tag::ItemKey;
+        tag.insert_text(ItemKey::Unknown("COUNTRY".to_string()), track.country.clone());
+    }
+    if !track.label.is_empty() {
+        use lofty::tag::ItemKey;
+        tag.insert_text(ItemKey::Unknown("ORGANIZATION".to_string()), track.label.clone());
+    }
+    if !track.catalog.is_empty() {
+        use lofty::tag::ItemKey;
+        tag.insert_text(ItemKey::Unknown("CATALOGNUMBER".to_string()), track.catalog.clone());
     }
 
     tagged_file.save_to_path(filepath, lofty::config::WriteOptions::default())

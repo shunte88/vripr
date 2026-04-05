@@ -20,7 +20,7 @@ fn sample_track() -> TrackMeta {
 #[test]
 fn test_write_tags_missing_file() {
     let track = sample_track();
-    let result = write_tags(std::path::Path::new("/nonexistent/path/track.flac"), &track);
+    let result = write_tags(std::path::Path::new("/nonexistent/path/track.flac"), &track, "");
     assert!(result.is_err(), "write_tags on nonexistent file should return error");
 }
 
@@ -30,7 +30,7 @@ fn test_write_tags_wrong_extension() {
     let tmp = tempfile::NamedTempFile::with_suffix(".xyz").unwrap();
     let track = sample_track();
     // Should return error (cannot probe file type) — no panic allowed
-    let result = std::panic::catch_unwind(|| write_tags(tmp.path(), &track));
+    let result = std::panic::catch_unwind(|| write_tags(tmp.path(), &track, ""));
     match result {
         Ok(Ok(())) => {} // unexpectedly succeeded
         Ok(Err(_)) => {} // expected: returned an error
@@ -89,7 +89,7 @@ fn test_write_tags_flac() {
     // lofty may panic when writing to a FLAC with no audio frames (lofty bug/limitation).
     // We use catch_unwind to prevent the panic from failing the test process — the key
     // invariant is that write_tags either returns Ok/Err or panics gracefully (caught here).
-    let result = std::panic::catch_unwind(|| write_tags(&flac_path, &track));
+    let result = std::panic::catch_unwind(|| write_tags(&flac_path, &track, ""));
     match result {
         Ok(Ok(())) => {
             // Tags written successfully — great
@@ -119,7 +119,7 @@ fn test_write_tags_no_title_skipped() {
     };
 
     // No panic allowed (caught if it occurs)
-    let result = std::panic::catch_unwind(|| write_tags(&flac_path, &track));
+    let result = std::panic::catch_unwind(|| write_tags(&flac_path, &track, ""));
     match result {
         Ok(_) | Err(_) => {} // Either outcome is acceptable for a minimal FLAC
     }

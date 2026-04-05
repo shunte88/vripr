@@ -2,7 +2,7 @@
 name = "vripr"
 version = "0.2.0"
 edition = "2021"
-description = "Vinyl Ripper Helper — Audacity assistant for digitising vinyl records"
+description = "VRipr — Master Vinyl Rippage — Audacity assistant for digitising vinyl records"
 license = "MIT"
 rust-version = "1.75"
 
