@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use std::path::PathBuf;
 
-use crate::audio::{detect_tracks, DetectorConfig};
-use crate::config::Config;
+use crate::audio::{detect_tracks, detect_tracks_spectral, DetectorConfig};
+use crate::config::{Config, DetectionMethod};
 use crate::metadata::{
     assign_discogs_titles, compare_duration_report, discogs_encode_query,
     discogs_fetch_image, discogs_fetch_release, discogs_search_candidates,
@@ -691,24 +691,33 @@ impl VriprApp {
                 let mut best_detected: Vec<crate::audio::DetectedTrack> = Vec::new();
                 let mut best_diag: Option<crate::audio::DetectorDiagnostics> = None;
 
+                let use_spectral = config.detection_method == DetectionMethod::Spectral;
+
                 for (attempt, &(min_sil, min_snd, gap_fill)) in retry_params.iter().enumerate() {
                     let det_cfg = DetectorConfig {
-                        threshold_db:       config.silence_threshold_db,
-                        adaptive:           config.use_adaptive_threshold,
-                        adaptive_margin_db: config.adaptive_margin_db,
-                        min_silence_secs:   min_sil,
-                        min_sound_secs:     min_snd,
-                        gap_fill_secs:      gap_fill,
-                        window_ms:          50,
+                        threshold_db:               config.silence_threshold_db,
+                        adaptive:                   config.use_adaptive_threshold,
+                        adaptive_margin_db:         config.adaptive_margin_db,
+                        min_silence_secs:           min_sil,
+                        min_sound_secs:             min_snd,
+                        gap_fill_secs:              gap_fill,
+                        window_ms:                  50,
+                        spectral_flatness_threshold: config.spectral_flatness_threshold,
                         ..DetectorConfig::default()
                     };
 
                     let path2 = path.clone();
                     let tx2   = tx.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        detect_tracks(&path2, &det_cfg, &mut |_| {
-                            let _ = tx2.send(WorkerMessage::Log(String::new()));
-                        })
+                        if use_spectral {
+                            detect_tracks_spectral(&path2, &det_cfg, &mut |_| {
+                                let _ = tx2.send(WorkerMessage::Log(String::new()));
+                            })
+                        } else {
+                            detect_tracks(&path2, &det_cfg, &mut |_| {
+                                let _ = tx2.send(WorkerMessage::Log(String::new()));
+                            })
+                        }
                     }).await;
 
                     match result {
@@ -913,24 +922,32 @@ impl VriprApp {
             ];
 
             let mut best: Vec<crate::audio::DetectedTrack> = Vec::new();
+            let use_spectral = config.detection_method == DetectionMethod::Spectral;
 
             for (attempt, &(min_sil, min_snd, gap_fill)) in retry_params.iter().enumerate() {
                 let det_cfg = DetectorConfig {
-                    threshold_db:       config.silence_threshold_db,
-                    adaptive:           config.use_adaptive_threshold,
-                    adaptive_margin_db: config.adaptive_margin_db,
-                    min_silence_secs:   min_sil,
-                    min_sound_secs:     min_snd,
-                    gap_fill_secs:      gap_fill,
-                    window_ms:          50,
+                    threshold_db:                config.silence_threshold_db,
+                    adaptive:                    config.use_adaptive_threshold,
+                    adaptive_margin_db:          config.adaptive_margin_db,
+                    min_silence_secs:            min_sil,
+                    min_sound_secs:              min_snd,
+                    gap_fill_secs:               gap_fill,
+                    window_ms:                   50,
+                    spectral_flatness_threshold: config.spectral_flatness_threshold,
                     ..DetectorConfig::default()
                 };
                 let path2 = wav_path.clone();
                 let tx2   = tx.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    detect_tracks(&path2, &det_cfg, &mut |_| {
-                        let _ = tx2.send(WorkerMessage::Log(String::new()));
-                    })
+                    if use_spectral {
+                        detect_tracks_spectral(&path2, &det_cfg, &mut |_| {
+                            let _ = tx2.send(WorkerMessage::Log(String::new()));
+                        })
+                    } else {
+                        detect_tracks(&path2, &det_cfg, &mut |_| {
+                            let _ = tx2.send(WorkerMessage::Log(String::new()));
+                        })
+                    }
                 }).await;
 
                 match result {

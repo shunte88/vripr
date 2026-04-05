@@ -22,7 +22,7 @@ VRipr sits alongside Audacity while you rip a vinyl record. It:
 
 1. **Connects** to Audacity via the scripting pipe and exports the current project to a clean analysis WAV — capturing any edits you've already made (needle-drop removal, fades, etc.)
 2. **Fetches** the album's track listing and durations from Discogs
-3. **Detects** track boundaries with a multi-pass silence scanner, automatically retrying with shorter gap thresholds until the count matches Discogs
+3. **Detects** track boundaries with a multi-pass silence scanner — either classic RMS energy or a spectral-flatness mode for noisy pressings — automatically retrying with shorter gap thresholds until the count matches Discogs
 4. **Shows** an interactive waveform with draggable track markers so you can fine-tune any boundaries the algorithm gets wrong
 5. **Sets labels** in Audacity for a final visual review, then **exports** each track as a tagged FLAC/MP3/WAV/OGG with full metadata including a `DISCOGS_RELEASEID` custom tag and `folder.jpg` cover art
 
@@ -80,6 +80,19 @@ VRipr communicates with Audacity through named pipes. If the connection fails, c
 
 ## Installation
 
+### Pre-built binaries
+
+GitHub Actions builds a native binary for every push to `main` and on every `v*` tag:
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 | `vripr-linux-x86_64` |
+| macOS Apple Silicon | `vripr-macos-arm64` |
+| macOS Intel | `vripr-macos-x86_64` |
+| Windows x86_64 | `vripr-windows-x86_64.exe` |
+
+Download from the [Releases](../../releases) page. All binaries are self-contained — no runtime dependencies, no system libraries required.
+
 ### Build from source
 
 ```bash
@@ -126,6 +139,8 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 | **Min inter-track silence** | Shortest gap that registers as a track boundary (first pass; retries shorten this automatically) |
 | **Min track duration** | Regions shorter than this are discarded as noise (first pass; retries lower this automatically) |
 | **Adaptive threshold** | Measures the recording's noise floor and sets the threshold automatically |
+| **Detection Method** | `RMS` (default) or `Spectral` — see [Detection algorithm](#detection-algorithm) |
+| **Flatness threshold** | Spectral mode only: flatness above this is treated as noise (0.5–0.99, default 0.85) |
 | **Track Number Format** | Alpha (A1, B2 …) for vinyl positions or Numeric (1, 2, 3 …) |
 
 ---
@@ -250,7 +265,11 @@ With ISO country code and catalogue number:
 
 ## Detection algorithm
 
-VRipr uses a whole-file RMS silence scanner (not Audacity's `LabelSounds`). The scanner:
+VRipr ships two track-boundary detectors. Both operate on the full analysis WAV (not Audacity's `LabelSounds`) and share the same multi-pass retry loop.
+
+### RMS (default)
+
+The classic energy-based scanner:
 
 1. Decodes the analysis WAV to per-window RMS values (50 ms windows)
 2. Applies hysteresis to avoid rapid toggling on borderline signals
@@ -258,9 +277,31 @@ VRipr uses a whole-file RMS silence scanner (not Audacity's `LabelSounds`). The 
 4. Requires a minimum silence duration for a gap to count as a track boundary
 5. Discards regions shorter than the minimum track duration
 
-If the detected count doesn't match Discogs, it retries up to four more times, halving the minimum silence and track duration each pass, until the count matches or all passes are exhausted.
+Works well for clean pressings where the inter-track groove is meaningfully quieter than the music.
 
-The gap-fill threshold is always kept below the minimum silence threshold — this prevents the filler from bridging the very gaps it's trying to detect, which is a common failure mode in naive silence detectors.
+### Spectral (noise-aware)
+
+A combined energy + spectral-flatness scanner, better suited to noisy pressings where the inter-track groove is *loud* but acoustically different from music.
+
+The key insight: **surface noise is spectrally flat** (energy spread roughly evenly across all frequencies, like white noise) while **music is spectrally peaked** (energy concentrated in harmonically related bands). Spectral flatness — the ratio of the geometric mean to the arithmetic mean of the power spectrum — measures this distinction on a 0–1 scale: 0 = perfectly tonal, 1 = white noise. Inter-track groove noise typically scores 0.80–0.95; music 0.10–0.50.
+
+For each 50 ms window the detector computes:
+1. **RMS** — as in the energy-only scanner
+2. **Spectral flatness** via FFT (Hann-windowed, zero-padded to the next power of two, positive-frequency half-spectrum). A ±2-window (≈250 ms) rolling average smooths the flatness signal before thresholding.
+
+A frame is classified as *between tracks* if:
+- Its RMS falls below the energy threshold (ordinary silence), **or**
+- Its RMS is above the threshold *and* its smoothed flatness exceeds the flatness threshold (energetic surface noise)
+
+Everything downstream — gap-fill, minimum silence, minimum track duration, multi-pass retry, padding, de-overlap — is identical to the RMS detector.
+
+**When to use it:** if your pressing is noisy, the RMS detector reports more tracks than expected (it mistakes surface noise for music), and lowering the threshold further starts eating into quiet musical passages — switch to Spectral. The flatness threshold defaults to 0.85; lower it slightly if real music is being cut, raise it if surface noise is still leaking through.
+
+**Implementation:** pure Rust via `rustfft` — no system libraries, no C dependencies. Works identically on Linux, macOS, and Windows.
+
+### Shared retry loop
+
+If the detected count doesn't match Discogs, both detectors retry up to four more times, progressively shortening the minimum silence and track duration each pass, until the count matches or all passes are exhausted. The gap-fill threshold is always kept below the minimum silence threshold to prevent the filler from bridging the very gaps it's trying to detect.
 
 ---
 

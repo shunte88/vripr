@@ -1,6 +1,6 @@
 [package]
 name = "vripr"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "VRipr — Master Vinyl Rippage — Audacity assistant for digitising vinyl records"
 license = "MIT"
@@ -26,6 +26,7 @@ lofty = "0.21"
 symphonia = { version = "0.5", features = ["pcm", "wav", "flac", "mp3", "ogg", "vorbis"] }
 toml = "0.8"
 anyhow = "1"
+rustfft = "6"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,6 +1,6 @@
 use egui::{Context, Ui};
 
-use crate::config::{Config, ExportFormat, TrackNumberFormat};
+use crate::config::{Config, DetectionMethod, ExportFormat, TrackNumberFormat};
 use crate::workers::export::{validate_path_template, SUPPORTED_TOKENS};
 
 pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool) {
@@ -211,6 +211,42 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
             if config.use_adaptive_threshold {
                 ui.label("Margin above noise floor (dB):");
                 ui.add(egui::Slider::new(&mut config.adaptive_margin_db, 3.0..=30.0).text("dB"));
+                ui.end_row();
+            }
+
+            ui.label("Detection Method:")
+                .on_hover_text(
+                    "RMS: classic energy-based detector — fast, works on clean pressings.\n\
+                     Spectral: combines energy + spectral flatness — better for noisy pressings \
+                     where inter-track groove noise is loud but spectrally different from music."
+                );
+            egui::ComboBox::from_id_source("detection_method_combo")
+                .selected_text(config.detection_method.display_str())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut config.detection_method,
+                        DetectionMethod::Rms,
+                        DetectionMethod::Rms.display_str(),
+                    );
+                    ui.selectable_value(
+                        &mut config.detection_method,
+                        DetectionMethod::Spectral,
+                        DetectionMethod::Spectral.display_str(),
+                    );
+                });
+            ui.end_row();
+
+            if config.detection_method == DetectionMethod::Spectral {
+                ui.label("Flatness threshold:")
+                    .on_hover_text(
+                        "Spectral flatness above which a frame is classified as noise (0 = tonal, 1 = white noise).\n\
+                         Inter-track groove noise is typically 0.80–0.95; music 0.10–0.50.\n\
+                         Lower = more sensitive (may cut into quiet passages); higher = less sensitive."
+                    );
+                ui.add(
+                    egui::Slider::new(&mut config.spectral_flatness_threshold, 0.5..=0.99)
+                        .step_by(0.01)
+                );
                 ui.end_row();
             }
         });

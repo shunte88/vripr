@@ -39,6 +39,37 @@ impl ExportFormat {
     }
 }
 
+/// Which detection algorithm to use for finding track boundaries.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DetectionMethod {
+    /// Classic whole-file RMS energy scanner.
+    Rms,
+    /// Spectral flatness scanner — distinguishes music (tonal) from groove noise (flat).
+    /// Better for noisy pressings where silence is loud but spectrally different from music.
+    Spectral,
+}
+
+impl DetectionMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DetectionMethod::Rms      => "rms",
+            DetectionMethod::Spectral => "spectral",
+        }
+    }
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "spectral" => DetectionMethod::Spectral,
+            _          => DetectionMethod::Rms,
+        }
+    }
+    pub fn display_str(&self) -> &'static str {
+        match self {
+            DetectionMethod::Rms      => "RMS (default)",
+            DetectionMethod::Spectral => "Spectral (noise-aware)",
+        }
+    }
+}
+
 /// How track numbers are formatted when populating the track table from Discogs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackNumberFormat {
@@ -136,6 +167,10 @@ struct SilenceSection {
     adaptive: bool,
     #[serde(default = "default_adaptive_margin_db")]
     adaptive_margin_db: f64,
+    #[serde(default = "default_detection_method_str")]
+    method: String,
+    #[serde(default = "default_flatness_threshold")]
+    flatness_threshold: f64,
 }
 
 impl Default for SilenceSection {
@@ -146,6 +181,8 @@ impl Default for SilenceSection {
             min_sound_dur:      default_min_sound_dur(),
             adaptive:           false,
             adaptive_margin_db: default_adaptive_margin_db(),
+            method:             default_detection_method_str(),
+            flatness_threshold: default_flatness_threshold(),
         }
     }
 }
@@ -188,7 +225,9 @@ impl Default for DefaultsSection {
 
 fn default_track_number_format() -> String { "alpha".to_string() }
 
-fn default_format()       -> String { "flac".to_string() }
+fn default_format()         -> String { "flac".to_string() }
+fn default_detection_method_str() -> String { "rms".to_string() }
+fn default_flatness_threshold()   -> f64    { 0.85 }
 fn default_path_template() -> String {
     "{album_artist}/{album}/{tracknum} - {title}".to_string()
 }
@@ -225,6 +264,8 @@ pub struct Config {
     pub silence_min_sound_dur: f64,
     pub use_adaptive_threshold: bool,
     pub adaptive_margin_db: f64,
+    pub detection_method: DetectionMethod,
+    pub spectral_flatness_threshold: f64,
     pub default_artist: String,
     pub default_album: String,
     pub default_album_artist: String,
@@ -253,11 +294,13 @@ impl Config {
             export_dir:           PathBuf::from(&f.export.dir),
             export_path_template: f.export.path_template,
             default_comments:     f.export.default_comments,
-            silence_threshold_db: f.silence.threshold_db,
-            silence_min_duration: f.silence.min_duration,
-            silence_min_sound_dur: f.silence.min_sound_dur,
-            use_adaptive_threshold: f.silence.adaptive,
-            adaptive_margin_db:     f.silence.adaptive_margin_db,
+            silence_threshold_db:    f.silence.threshold_db,
+            silence_min_duration:    f.silence.min_duration,
+            silence_min_sound_dur:   f.silence.min_sound_dur,
+            use_adaptive_threshold:  f.silence.adaptive,
+            adaptive_margin_db:      f.silence.adaptive_margin_db,
+            detection_method:        DetectionMethod::from_str(&f.silence.method),
+            spectral_flatness_threshold: f.silence.flatness_threshold,
             default_artist:         f.defaults.artist,
             default_album:          f.defaults.album,
             default_album_artist:   f.defaults.album_artist,
@@ -285,6 +328,8 @@ impl Config {
                 min_sound_dur:      self.silence_min_sound_dur,
                 adaptive:           self.use_adaptive_threshold,
                 adaptive_margin_db: self.adaptive_margin_db,
+                method:             self.detection_method.as_str().to_string(),
+                flatness_threshold: self.spectral_flatness_threshold,
             },
             defaults: DefaultsSection {
                 artist:              self.default_artist.clone(),

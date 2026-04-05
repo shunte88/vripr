@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use rustfft::{num_complex::Complex, FftPlanner};
 use std::path::Path;
 use tracing::{debug, info};
 
@@ -31,6 +32,10 @@ pub struct DetectorConfig {
     pub post_padding: f64,
     /// Analysis window size in milliseconds. (default 100)
     pub window_ms: u32,
+    /// Spectral flatness above which a frame is considered noise/between-tracks.
+    /// Range 0.0–1.0; 0.0 = perfectly tonal, 1.0 = white noise.
+    /// Only used by `detect_tracks_spectral`. (default 0.85)
+    pub spectral_flatness_threshold: f64,
 }
 
 impl Default for DetectorConfig {
@@ -45,7 +50,8 @@ impl Default for DetectorConfig {
             min_sound_secs:    2.0,
             pre_padding:       0.1,
             post_padding:      0.1,
-            window_ms:         100,
+            window_ms:                    100,
+        spectral_flatness_threshold:  0.85,
         }
     }
 }
@@ -161,6 +167,132 @@ pub fn detect_tracks(
             let mid = (tracks[i - 1].end + tracks[i].start) / 2.0;
             tracks[i - 1].end = mid;
             tracks[i].start = mid;
+        }
+    }
+
+    let diag = DetectorDiagnostics {
+        threshold_db,
+        noise_floor_db,
+        total_secs,
+        n_windows,
+        window_secs,
+    };
+
+    Ok((tracks, diag))
+}
+
+/// Spectral-flatness track detector.
+///
+/// Uses the same `DetectorConfig` as `detect_tracks` (threshold, min_silence, gap_fill, etc.)
+/// but operates on a combined energy + spectral-flatness signal rather than raw RMS alone.
+///
+/// A frame is classified as "between tracks" if either:
+/// - Its RMS energy falls below the threshold (ordinary silence), OR
+/// - Its spectral flatness exceeds `cfg.spectral_flatness_threshold` while energy is still
+///   present (loud surface noise that looks spectrally flat, unlike tonal music).
+///
+/// This makes it significantly more robust than pure RMS on noisy pressings where the
+/// inter-track groove noise is loud enough to fool the energy threshold.
+pub fn detect_tracks_spectral(
+    path: &Path,
+    cfg: &DetectorConfig,
+    progress: &mut impl FnMut(f64),
+) -> Result<(Vec<DetectedTrack>, DetectorDiagnostics)> {
+    let window_secs = cfg.window_ms as f64 / 1000.0;
+
+    let (windows, sample_rate, total_frames) =
+        decode_spectral_windows(path, window_secs, progress)?;
+
+    let total_secs = total_frames as f64 / sample_rate as f64;
+    let n_windows  = windows.len();
+
+    if n_windows == 0 {
+        return Err(anyhow!("Audio file produced no samples"));
+    }
+
+    // --- Determine energy threshold (same adaptive logic as detect_tracks) ---
+    let rms_vals: Vec<f64> = windows.iter().map(|(r, _)| *r).collect();
+    let (threshold_db, noise_floor_db) = if cfg.adaptive {
+        let nf    = adaptive_noise_floor(&rms_vals);
+        let nf_db = linear_to_db(nf);
+        let thr   = nf_db + cfg.adaptive_margin_db;
+        info!(
+            "Spectral detector: adaptive threshold = {:.1} dB (noise floor {:.1} dB)",
+            thr, nf_db
+        );
+        (thr, Some(nf_db))
+    } else {
+        (cfg.threshold_db, None)
+    };
+
+    let thr_lin       = db_to_linear(threshold_db);
+    let thr_entry_lin = db_to_linear(threshold_db - cfg.hysteresis_db);
+    let flat_thr      = cfg.spectral_flatness_threshold;
+
+    // --- Smooth flatness with a ±2-window rolling average (≈250 ms at 50 ms windows) ---
+    let smooth_r = 2usize;
+    let flatness_raw: Vec<f64> = windows.iter().map(|(_, f)| *f).collect();
+    let flatness: Vec<f64> = (0..n_windows)
+        .map(|i| {
+            let lo = i.saturating_sub(smooth_r);
+            let hi = (i + smooth_r + 1).min(n_windows);
+            flatness_raw[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
+        })
+        .collect();
+
+    // --- State machine ---
+    // "between tracks": low energy (silent) OR high flatness with present energy (surface noise)
+    let mut sound_regions: Vec<(f64, f64)> = Vec::new();
+    let mut in_sound   = false;
+    let mut sound_start = 0.0f64;
+
+    for (i, &(rms, _)) in windows.iter().enumerate() {
+        let t    = i as f64 * window_secs;
+        let flat = flatness[i];
+
+        let is_between = if rms < thr_entry_lin {
+            true              // ordinary silence / very quiet
+        } else {
+            flat > flat_thr   // energetic but spectrally flat = surface noise
+        };
+
+        if !in_sound {
+            if !is_between {
+                in_sound    = true;
+                sound_start = t;
+            }
+        } else if is_between {
+            in_sound = false;
+            sound_regions.push((sound_start, t));
+        }
+    }
+    if in_sound {
+        sound_regions.push((sound_start, total_secs));
+    }
+
+    debug!("Spectral raw regions: {}", sound_regions.len());
+
+    // --- Post-processing: gap fill, min-silence merge, min-sound filter, padding ---
+    let sound_regions = merge_gaps(sound_regions, cfg.gap_fill_secs);
+    let sound_regions = merge_gaps(sound_regions, cfg.min_silence_secs);
+    let sound_regions: Vec<(f64, f64)> = sound_regions
+        .into_iter()
+        .filter(|(s, e)| (e - s) >= cfg.min_sound_secs)
+        .collect();
+
+    let mut tracks: Vec<DetectedTrack> = sound_regions
+        .into_iter()
+        .map(|(s, e)| DetectedTrack {
+            start: (s - cfg.pre_padding).max(0.0),
+            end:   (e + cfg.post_padding).min(total_secs),
+        })
+        .collect();
+
+    for i in 1..tracks.len() {
+        if tracks[i].start < tracks[i - 1].end {
+            let mid = (tracks[i - 1].end + tracks[i].start) / 2.0;
+            tracks[i - 1].end = mid;
+            tracks[i].start   = mid;
         }
     }
 
@@ -699,4 +831,184 @@ fn decode_rms_windows(
 
     progress(1.0);
     Ok((rms_windows, sample_rate, total_decoded))
+}
+
+/// Decode an audio file and return per-window `(rms, spectral_flatness)`, sample rate,
+/// and total frame count.
+///
+/// Each window is Hann-windowed before FFT.  Spectral flatness is computed over the
+/// positive-frequency half-spectrum (DC..Nyquist) as `geometric_mean / arithmetic_mean`
+/// of the magnitude bins.
+fn decode_spectral_windows(
+    path: &Path,
+    window_secs: f64,
+    progress: &mut impl FnMut(f64),
+) -> Result<(Vec<(f64, f64)>, u32, u64)> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+    use symphonia::core::errors::Error as SErr;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let src = std::fs::File::open(path)
+        .map_err(|e| anyhow!("Cannot open audio file {:?}: {}", path, e))?;
+    let mss = MediaSourceStream::new(Box::new(src), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| anyhow!("Unsupported audio format: {}", e))?;
+
+    let mut format = probed.format;
+
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| anyhow!("No decodable audio track found in {:?}", path))?;
+
+    let sample_rate  = track.codec_params.sample_rate.unwrap_or(44100);
+    let n_channels   = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
+    let total_frames = track.codec_params.n_frames.unwrap_or(0);
+    let track_id     = track.id;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| anyhow!("Cannot create decoder: {}", e))?;
+
+    let frames_per_window = ((sample_rate as f64) * window_secs) as usize;
+    let fft_size = frames_per_window.next_power_of_two();
+
+    // Pre-compute Hann window coefficients
+    let hann: Vec<f32> = (0..frames_per_window)
+        .map(|i| {
+            let x = 2.0 * std::f64::consts::PI * i as f64 / (frames_per_window - 1) as f64;
+            (0.5 - 0.5 * x.cos()) as f32
+        })
+        .collect();
+
+    let mut planner: FftPlanner<f32> = FftPlanner::new();
+    let fft = planner.plan_fft_forward(fft_size);
+
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut win_buf: Vec<f32> = Vec::with_capacity(frames_per_window);
+    let mut windows: Vec<(f64, f64)> = Vec::new();
+    let mut total_decoded: u64 = 0;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p)                    => p,
+            Err(SErr::IoError(_))    => break,
+            Err(SErr::ResetRequired) => { decoder.reset(); continue; }
+            Err(e)                   => return Err(e.into()),
+        };
+
+        if packet.track_id() != track_id { continue; }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(d)                     => d,
+            Err(SErr::DecodeError(_)) => continue,
+            Err(SErr::IoError(_))     => break,
+            Err(e)                    => return Err(e.into()),
+        };
+
+        let spec = *decoded.spec();
+        if sample_buf.is_none() {
+            sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
+        }
+        let buf = sample_buf.as_mut().unwrap();
+        buf.copy_interleaved_ref(decoded);
+
+        for frame in buf.samples().chunks(n_channels) {
+            let mono: f32 = frame.iter().map(|&s| s).sum::<f32>() / n_channels as f32;
+            win_buf.push(mono);
+            total_decoded += 1;
+
+            if win_buf.len() >= frames_per_window {
+                // Compute RMS
+                let rms = {
+                    let ss: f64 = win_buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
+                    (ss / win_buf.len() as f64).sqrt()
+                };
+
+                // Apply Hann window and zero-pad to fft_size
+                let mut fft_buf: Vec<Complex<f32>> = (0..fft_size)
+                    .map(|i| {
+                        let s = if i < frames_per_window {
+                            win_buf[i] * hann[i]
+                        } else {
+                            0.0
+                        };
+                        Complex { re: s, im: 0.0 }
+                    })
+                    .collect();
+
+                fft.process(&mut fft_buf);
+
+                // Magnitude of positive-frequency bins (DC .. Nyquist inclusive)
+                let n_bins = fft_size / 2 + 1;
+                let magnitudes: Vec<f32> = fft_buf[..n_bins]
+                    .iter()
+                    .map(|c| c.norm())
+                    .collect();
+
+                let flatness = compute_spectral_flatness(&magnitudes);
+
+                windows.push((rms, flatness));
+                win_buf.clear();
+            }
+        }
+
+        if total_frames > 0 {
+            progress((total_decoded as f64 / total_frames as f64).min(1.0));
+        }
+    }
+
+    // Flush partial window
+    if !win_buf.is_empty() {
+        let rms = {
+            let ss: f64 = win_buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
+            (ss / win_buf.len() as f64).sqrt()
+        };
+        // Too short for a reliable FFT — carry rms forward, flatness=0 (treat as music)
+        windows.push((rms, 0.0));
+    }
+
+    progress(1.0);
+    Ok((windows, sample_rate, total_decoded))
+}
+
+/// Spectral flatness = geometric_mean(|X|) / arithmetic_mean(|X|).
+///
+/// Returned range: 0.0 (perfectly tonal) to 1.0 (white noise).
+/// Returns 1.0 for pure silence (all bins zero) so silent frames are
+/// classified as "between tracks" by the spectral detector.
+fn compute_spectral_flatness(magnitudes: &[f32]) -> f64 {
+    if magnitudes.is_empty() { return 1.0; }
+
+    let arith: f64 = magnitudes.iter().map(|&m| m as f64).sum::<f64>()
+        / magnitudes.len() as f64;
+
+    if arith < 1e-10 {
+        return 1.0; // silence → treat as between-tracks
+    }
+
+    // Geometric mean via log-space to avoid underflow
+    let log_mean: f64 = magnitudes
+        .iter()
+        .map(|&m| {
+            let v = m as f64;
+            if v > 1e-10 { v.ln() } else { -23.0 } // ln(1e-10) ≈ -23
+        })
+        .sum::<f64>()
+        / magnitudes.len() as f64;
+
+    let geo = log_mean.exp();
+    (geo / arith).clamp(0.0, 1.0)
 }
