@@ -10,4 +10,4 @@ pub use manual_track_dialog::*;
 pub use settings_dialog::*;
 pub use toolbar::*;
 pub use track_table::*;
-pub use waveform::{WaveformDragState, WaveformEvent};
+pub use waveform::WaveformDragState;

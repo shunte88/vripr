@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use tracing::{debug, warn};
 
 #[derive(Debug, Clone, Default)]

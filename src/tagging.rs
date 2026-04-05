@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use std::path::Path;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::track::TrackMeta;
 

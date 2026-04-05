@@ -3,7 +3,7 @@ use egui_extras::{Column, TableBuilder};
 use std::collections::HashSet;
 
 use crate::track::TrackMeta;
-use crate::workers::{AppSender, WorkerMessage};
+use crate::workers::AppSender;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableAction {
