@@ -142,7 +142,7 @@ pub fn detect_tracks(
     debug!("After min-sound filter: {}", sound_regions.len());
 
     // --- Phase 7: apply pre/post padding, clamp, de-overlap ---
-    let n = sound_regions.len();
+    let _n = sound_regions.len();
     let tracks: Vec<DetectedTrack> = sound_regions
         .into_iter()
         .enumerate()
@@ -225,7 +225,7 @@ pub fn detect_tracks_spectral(
         (cfg.threshold_db, None)
     };
 
-    let thr_lin       = db_to_linear(threshold_db);
+    let _thr_lin       = db_to_linear(threshold_db);
     let thr_entry_lin = db_to_linear(threshold_db - cfg.hysteresis_db);
     let flat_thr      = cfg.spectral_flatness_threshold;
 

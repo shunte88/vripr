@@ -621,7 +621,7 @@ impl VriprApp {
         let token        = self.discogs_picker_token.clone();
         let tx           = self.worker_tx.clone();
         let config       = self.config.clone();
-        let pipe         = self.pipe.clone();
+        let _pipe         = self.pipe.clone();
         let analysis_wav = self.analysis_wav.clone();
         let selected_side = self.selected_side;
 
