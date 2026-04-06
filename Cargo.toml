@@ -34,11 +34,10 @@ dirs = "5"
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rfd = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["user"] }
-
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
