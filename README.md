@@ -275,7 +275,7 @@ The **Side:** selector in the toolbar handles the metadata side of this workflow
 
 Track numbers are assigned from the Discogs vinyl position (`B1`, `B2`, …) regardless of the order you rip, so exported files sort correctly in your library.
 
-> **What the Side selector does not do**: it does not make multi-side audio easier to analyse. If you've recorded Sides A and B as one 90-minute file, selecting "Side A" only filters the *metadata* — the detector still has to find all the tracks in 90 minutes of audio. Record one side at a time.
+> **What the Side selector does not do**: it does not make multi-side audio easier to analyse. If you've recorded Sides A and B as one 90-minute file, selecting "Side A" only filters the *metadata* — the detector still has to find all the tracks in 90 minutes of audio. The best approach is to rip all sides in sequence as a single continuous recording, then use the **All** option in the Side selector — VRipr will detect tracks across the full recording and match them to the complete tracklist in order.
 
 ### 5. Set labels in Audacity
 
