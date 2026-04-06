@@ -29,8 +29,8 @@ jobs:
             artifact: vripr
             asset_name: vripr-macos-arm64
 
-          # macOS Intel (native on macos-13)
-          - os: macos-13
+          # macOS Intel (cross-compiled from arm64 runner)
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact: vripr
             asset_name: vripr-macos-x86_64
