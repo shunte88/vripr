@@ -1,6 +1,6 @@
 [package]
 name = "vripr"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "VRipr — Master Vinyl Rippage — Audacity assistant for digitising vinyl records"
 license = "MIT"
@@ -47,3 +47,10 @@ tempfile = "3"
 [profile.release]
 opt-level = 3
 lto = true
+strip = true
+
+
+
+
+
+
