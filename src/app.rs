@@ -189,7 +189,6 @@ impl VriprApp {
         app
     }
 
-    /// Drain and process all pending worker messages.
     /// Push a message to the UI log panel and append it to the log file (if open).
     fn push_log(&mut self, msg: String) {
         use std::io::Write;
@@ -197,7 +196,7 @@ impl VriprApp {
             let _ = writeln!(f, "[{}] {}",
                 chrono::Local::now().format("%H:%M:%S"), msg);
         }
-        self.push_log(msg);
+        self.log_messages.push(msg);
     }
 
     fn process_messages(&mut self) {

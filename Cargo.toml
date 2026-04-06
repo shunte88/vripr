@@ -1,10 +1,10 @@
 [package]
 name = "vripr"
-version = "0.2.4"
-edition = "2021"
+version = "0.2.5"
+edition = "2024"
 description = "VRipr — Master Vinyl Rippage — Audacity assistant for digitising vinyl records"
 license = "MIT"
-rust-version = "1.75"
+rust-version = "1.87"
 
 [[bin]]
 name = "vripr"
@@ -49,7 +49,6 @@ tempfile = "3"
 [profile.release]
 opt-level = 3
 lto = true
-strip = true
 
 
 

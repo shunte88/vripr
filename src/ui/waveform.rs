@@ -214,7 +214,8 @@ pub fn show_waveform(
 
                 // Find which track was right-clicked
                 let hit = click_t.and_then(|t| {
-                    track_bounds.iter().enumerate().find(|(_, &(_, ts, te, _))| {
+                    track_bounds.iter().enumerate().find(|(_, entry)| {
+                        let (_, ts, te, _) = **entry;
                         t >= ts && t <= te
                     })
                 });

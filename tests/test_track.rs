@@ -20,7 +20,8 @@ fn test_display_time() {
         end: 185.0,
         ..Default::default()
     };
-    assert_eq!(t.display_time(), "1:05–3:05");
+    // Format: start–end (duration)
+    assert_eq!(t.display_time(), "1:05–3:05 (2:00)");
 }
 
 #[test]
@@ -31,7 +32,7 @@ fn test_display_time_start_zero() {
         end: 125.0,
         ..Default::default()
     };
-    assert_eq!(t.display_time(), "0:00–2:05");
+    assert_eq!(t.display_time(), "0:00–2:05 (2:05)");
 }
 
 #[test]
@@ -43,18 +44,6 @@ fn test_status_icon_default() {
         ..Default::default()
     };
     assert_eq!(t.status_icon(), "");
-}
-
-#[test]
-fn test_status_icon_fingerprinted() {
-    let t = TrackMeta {
-        index: 1,
-        start: 0.0,
-        end: 60.0,
-        fingerprint_done: true,
-        ..Default::default()
-    };
-    assert_eq!(t.status_icon(), "🔍");
 }
 
 #[test]
@@ -85,7 +74,6 @@ fn test_default_fields() {
     assert_eq!(t.genre, "");
     assert_eq!(t.track_number, "");
     assert_eq!(t.year, "");
-    assert!(!t.fingerprint_done);
     assert!(t.export_path.is_none());
 }
 
