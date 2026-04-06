@@ -1,3 +1,37 @@
+/*
+ *  app.rs
+ *
+ *  vripr - The vinyl viper for perfect rippage - Audacity vinyl ripping helper
+ *	(c) 2025-26 Stuart Hunter
+ *
+ *	TODO:
+ *
+ * MIT License
+ * 
+ * Copyright (c) 2026 VRipr Contributors
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ */
+
+#[allow(dead_code)]
+#[allow(unused_imports)]
 use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -705,12 +739,6 @@ impl VriprApp {
                 }
             }
 
-            // Collect track durations in release order
-            let durations: Vec<f64> = release.tracks.iter()
-                .map(|t| t.duration_secs.unwrap_or(0.0))
-                .collect();
-            let valid_durs = durations.iter().filter(|&&d| d > 0.0).count();
-
             // --- 3. Resolve audio file path ---
             // Use the analysis WAV exported on connect (reflects user edits).
             let audio_path: Option<PathBuf> = analysis_wav
@@ -768,7 +796,6 @@ impl VriprApp {
                         ..GuidedDetectorConfig::default()
                     };
                     let path2 = path.clone();
-                    let tx2   = tx.clone();
                     let _ = tx.send(WorkerMessage::Log(
                         "Guided detection: using Discogs durations as anchors…".into()
                     ));
@@ -970,6 +997,7 @@ impl VriprApp {
         });
     }
 
+    #[allow(dead_code)]
     fn split_by_durations(&mut self) {
         let Some(release) = self.discogs_release.clone() else { return };
 

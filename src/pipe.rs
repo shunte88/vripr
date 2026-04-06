@@ -1,3 +1,37 @@
+/*
+ *  pipe.rs
+ *
+ *  vripr - The vinyl viper for perfect rippage - Audacity vinyl ripping helper
+ *	(c) 2025-26 Stuart Hunter
+ *
+ *	TODO:
+ *
+ * MIT License
+ * 
+ * Copyright (c) 2026 VRipr Contributors
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ */
+
+#[allow(dead_code)]
+#[allow(unused_imports)]
 use anyhow::{anyhow, Context, Result};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -122,9 +156,7 @@ impl AudacityPipe {
 
         // Read response until sentinel
         let mut lines = Vec::new();
-        let mut success = true;
-
-        loop {
+        let success = loop {
             let mut line = String::new();
             let n = reader.read_line(&mut line)
                 .context("Failed to read from pipe")?;
@@ -136,20 +168,19 @@ impl AudacityPipe {
             let trimmed = line.trim_end_matches(|c| c == '\n' || c == '\r');
 
             if trimmed == "BatchCommand finished: OK" {
-                success = true;
-                break;
+                break true;
             } else if trimmed == "BatchCommand finished: Failed" {
-                success = false;
-                break;
+                break false;
             } else if !trimmed.is_empty() {
                 lines.push(trimmed.to_string());
             }
-        }
+        };
 
         Ok((lines.join("\n"), success))
     }
 
     /// Ping Audacity with an empty command to check connectivity.
+    #[allow(dead_code)]
     pub fn ping(&mut self) -> bool {
         match self.send("GetInfo: Type=Tracks Format=JSON") {
             Ok((_, success)) => success,
@@ -337,6 +368,7 @@ impl AudacityPipe {
     }
 
     /// Get tracks info from Audacity.
+    #[allow(dead_code)]
     pub fn get_tracks_info(&mut self) -> Result<serde_json::Value> {
         let (raw, _) = self.send("GetInfo: Type=Tracks Format=JSON")
             .context("GetInfo Tracks failed")?;
@@ -345,6 +377,7 @@ impl AudacityPipe {
     }
 
     /// Get version/info from Audacity via Menus query.
+    #[allow(dead_code)]
     pub fn get_version(&mut self) -> Result<String> {
         let (raw, _) = self.send("GetInfo: Type=Menus Format=JSON")
             .context("GetInfo Menus failed")?;
@@ -356,6 +389,7 @@ impl AudacityPipe {
     /// Audacity's `GetInfo: Type=Tracks` includes a `"filename"` field on wave
     /// tracks in recent versions. Returns `None` if Audacity is not connected
     /// or the field is absent.
+    #[allow(dead_code)]
     pub fn get_audio_file_path(&mut self) -> Result<Option<std::path::PathBuf>> {
         let (raw, _) = self.send("GetInfo: Type=Tracks Format=JSON")
             .context("GetInfo Tracks failed")?;

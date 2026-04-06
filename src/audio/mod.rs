@@ -1,3 +1,37 @@
+/*
+ *  mod.rs
+ *
+ *  vripr - The vinyl viper for perfect rippage - Audacity vinyl ripping helper
+ *	(c) 2025-26 Stuart Hunter
+ *
+ *	TODO:
+ *
+ * MIT License
+ * 
+ * Copyright (c) 2026 VRipr Contributors
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ */
+
+#[allow(dead_code)]
+#[allow(unused_imports)]
 use anyhow::{anyhow, Result};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::path::Path;
@@ -322,7 +356,9 @@ pub struct DetectorDiagnostics {
     pub threshold_db: f64,
     pub noise_floor_db: Option<f64>,
     pub total_secs: f64,
+    #[allow(dead_code)]
     pub n_windows: usize,
+    #[allow(dead_code)]
     pub window_secs: f64,
 }
 
@@ -534,6 +570,7 @@ pub fn detect_tracks_guided(
 /// `end = actual_start + discogs_duration` — no offset search needed.
 ///
 /// Returns `(actual_start, discogs_duration)` for each track with a known duration.
+#[allow(dead_code)]
 pub fn detect_track_starts(
     path: &Path,
     durations: &[f64],
