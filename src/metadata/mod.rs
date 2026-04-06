@@ -92,6 +92,38 @@ pub fn split_by_discogs_durations_fmt(
     tracks
 }
 
+/// Create placeholder TrackMeta entries from Discogs title-only data (no durations).
+/// All tracks get start=0/end=0 — the user can set times manually in the edit panel.
+pub fn title_only_tracks(
+    discogs_tracks: &[&DiscogsTrack],
+    release: &DiscogsRelease,
+    fmt: &TrackNumberFormat,
+) -> Vec<TrackMeta> {
+    discogs_tracks.iter().enumerate().map(|(i, dt)| {
+        let track_number = match fmt {
+            TrackNumberFormat::Alpha   => format!("{}{}", dt.side, dt.number),
+            TrackNumberFormat::Numeric => (i + 1).to_string(),
+        };
+        TrackMeta {
+            index:              i + 1,
+            start:              0.0,
+            end:                0.0,
+            title:              dt.title.clone(),
+            track_number,
+            album:              release.album.clone(),
+            album_artist:       release.album_artist.clone(),
+            artist:             release.album_artist.clone(),
+            year:               release.year.clone(),
+            genre:              release.genre.clone(),
+            discogs_release_id: release.release_id.clone(),
+            country:            release.country.clone(),
+            catalog:            release.catalog.clone(),
+            label:              release.label.clone(),
+            ..Default::default()
+        }
+    }).collect()
+}
+
 /// Compare the duration of each detected track against each Discogs track.
 ///
 /// Returns a human-readable comparison string for logging, plus a best-guess

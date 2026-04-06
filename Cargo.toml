@@ -38,6 +38,8 @@ rfd = "0.15"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["user"] }
 
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 [build-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 

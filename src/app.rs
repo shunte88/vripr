@@ -4,10 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use std::path::PathBuf;
 
-use crate::audio::{detect_tracks, detect_tracks_spectral, DetectorConfig};
+use crate::audio::{
+    detect_tracks, detect_tracks_guided, detect_tracks_hmm, detect_tracks_spectral,
+    DetectorConfig, GuidedDetectorConfig,
+};
 use crate::config::{Config, DetectionMethod};
 use crate::metadata::{
     assign_discogs_titles, compare_duration_report, discogs_encode_query,
+    title_only_tracks,
     discogs_fetch_image, discogs_fetch_release, discogs_search_candidates, discogs_search_by_catno,
     split_by_discogs_durations_fmt,
     DiscogsCandidate, DiscogsRelease,
@@ -30,6 +34,7 @@ pub struct VriprApp {
     pub pipe_connected: bool,
     pub is_busy: bool,
     pub log_messages: Vec<String>,
+    log_file: Option<std::fs::File>,
     pub selected_rows: HashSet<usize>,
 
     // Worker channel
@@ -114,17 +119,26 @@ impl VriprApp {
         }
         let (worker_tx, worker_rx) = mpsc::channel();
 
-        VriprApp {
+        // Open (or create + append) a log file alongside the config.
+        let log_file = crate::config::config_path()
+            .parent()
+            .map(|dir| dir.join("vripr.log"))
+            .and_then(|path| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .ok()
+            });
+
+        let mut app = VriprApp {
             config,
             tracks: Vec::new(),
             pipe: Arc::new(Mutex::new(AudacityPipe::new())),
             pipe_connected: false,
             is_busy: false,
-            log_messages: vec![format!(
-                "VRipr — Master Vinyl Rippage v{} ({}) ready.",
-                crate::build_info::VERSION,
-                crate::build_info::BUILD_DATE,
-            )],
+            log_messages: Vec::new(),
+            log_file,
             selected_rows: HashSet::new(),
             worker_tx,
             worker_rx,
@@ -157,17 +171,42 @@ impl VriprApp {
             waveform_selection: None,
             play_end: None,
             analysis_wav: None,
+        };
+
+        // Write session separator + startup message to log file and panel.
+        {
+            use std::io::Write;
+            if let Some(ref mut f) = app.log_file {
+                let _ = writeln!(f, "\n--- session {} ---",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+            }
         }
+        app.push_log(format!(
+            "VRipr — Master Vinyl Rippage v{} ({}) ready.",
+            crate::build_info::VERSION,
+            crate::build_info::BUILD_DATE,
+        ));
+        app
     }
 
     /// Drain and process all pending worker messages.
+    /// Push a message to the UI log panel and append it to the log file (if open).
+    fn push_log(&mut self, msg: String) {
+        use std::io::Write;
+        if let Some(ref mut f) = self.log_file {
+            let _ = writeln!(f, "[{}] {}",
+                chrono::Local::now().format("%H:%M:%S"), msg);
+        }
+        self.push_log(msg);
+    }
+
     fn process_messages(&mut self) {
         while let Ok(msg) = self.worker_rx.try_recv() {
             match msg {
                 WorkerMessage::Log(s) => {
                     if s.is_empty() { continue; }
                     tracing::info!("[Worker] {}", s);
-                    self.log_messages.push(s);
+                    self.push_log(s);
                     if self.log_messages.len() > 2000 {
                         self.log_messages.drain(0..500);
                     }
@@ -175,22 +214,22 @@ impl VriprApp {
                 WorkerMessage::PipeConnected { info } => {
                     self.pipe_connected = true;
                     self.is_busy = false;
-                    self.log_messages.push(format!("Connected to Audacity: {}", info));
+                    self.push_log(format!("Connected to Audacity: {}", info));
                 }
                 WorkerMessage::PipeDisconnected => {
                     self.pipe_connected = false;
                     self.is_busy = false;
-                    self.log_messages.push("Disconnected from Audacity.".into());
+                    self.push_log("Disconnected from Audacity.".into());
                 }
                 WorkerMessage::PipeError(e) => {
                     self.pipe_connected = false;
                     self.is_busy = false;
-                    self.log_messages.push(format!("Pipe error: {}", e));
+                    self.push_log(format!("Pipe error: {}", e));
                 }
                 WorkerMessage::TracksDetected(tracks) => {
                     self.tracks = tracks;
                     self.selected_rows.clear();
-                    self.log_messages.push(format!("Loaded {} track(s).", self.tracks.len()));
+                    self.push_log(format!("Loaded {} track(s).", self.tracks.len()));
                 }
                 WorkerMessage::TrackUpdate { index, updates } => {
                     self.apply_track_update(index, updates);
@@ -200,7 +239,7 @@ impl VriprApp {
                 }
                 WorkerMessage::WorkerError(e) => {
                     self.is_busy = false;
-                    self.log_messages.push(format!("✗ {}", e));
+                    self.push_log(format!("✗ {}", e));
                 }
                 WorkerMessage::WorkerFinished => {
                     self.is_busy = false;
@@ -209,26 +248,26 @@ impl VriprApp {
                 WorkerMessage::DiscogsSearchCandidates(candidates) => {
                     self.is_busy = false;
                     if candidates.is_empty() {
-                        self.log_messages.push("Discogs: no results found.".into());
+                        self.push_log("Discogs: no results found.".into());
                     } else if candidates.len() == 1 {
-                        self.log_messages.push(format!(
+                        self.push_log(format!(
                             "Discogs: 1 result — auto-selecting: {}", candidates[0].summary()
                         ));
                         self.discogs_candidates  = candidates;
                         self.discogs_auto_accept = true;
                     } else {
-                        self.log_messages.push(format!(
+                        self.push_log(format!(
                             "Discogs: {} candidate(s) found:", candidates.len()
                         ));
                         for (i, c) in candidates.iter().enumerate() {
-                            self.log_messages.push(format!("  {}. {}", i + 1, c.summary()));
+                            self.push_log(format!("  {}. {}", i + 1, c.summary()));
                         }
                         self.discogs_candidates  = candidates;
                         self.discogs_picker_open = true;
                     }
                 }
                 WorkerMessage::DiscogsReleaseFetched(release) => {
-                    self.log_messages.push(format!(
+                    self.push_log(format!(
                         "Discogs release loaded: {} — {} ({}) — {} tracks",
                         release.album_artist, release.album, release.year, release.tracks.len()
                     ));
@@ -237,7 +276,7 @@ impl VriprApp {
                         let dur_str = release.side_duration_secs(side)
                             .map(|d| format!("{:.0}s", d))
                             .unwrap_or_else(|| "?".into());
-                        self.log_messages.push(format!(
+                        self.push_log(format!(
                             "  Side {}: {} tracks, {}",
                             side, side_tracks.len(), dur_str
                         ));
@@ -252,7 +291,7 @@ impl VriprApp {
                     self.pending_cover_bytes = Some(bytes);
                 }
                 WorkerMessage::WaveformReady { path, samples, duration_secs } => {
-                    self.log_messages.push(format!(
+                    self.push_log(format!(
                         "Waveform ready: {:.0}s, {} bars", duration_secs, samples.len()
                     ));
                     self.analysis_wav      = Some(path);
@@ -281,7 +320,7 @@ impl VriprApp {
                 ));
             }
             Err(e) => {
-                self.log_messages.push(format!("Cover art decode failed: {}", e));
+                self.push_log(format!("Cover art decode failed: {}", e));
             }
         }
     }
@@ -292,7 +331,7 @@ impl VriprApp {
                 self.cover_image_bytes = Some(bytes.clone());
                 self.load_cover_texture(ctx, &bytes);
             }
-            Err(e) => self.log_messages.push(format!("Cover art: {}", e)),
+            Err(e) => self.push_log(format!("Cover art: {}", e)),
         }
     }
 
@@ -419,16 +458,16 @@ impl VriprApp {
             pipe.disconnect();
         }
         self.pipe_connected = false;
-        self.log_messages.push("Disconnected from Audacity.".into());
+        self.push_log("Disconnected from Audacity.".into());
     }
 
     fn set_labels(&mut self, ctx: egui::Context) {
         if self.tracks.is_empty() {
-            self.log_messages.push("No tracks — fetch a release first.".into());
+            self.push_log("No tracks — fetch a release first.".into());
             return;
         }
         if !self.pipe_connected {
-            self.log_messages.push("Not connected to Audacity.".into());
+            self.push_log("Not connected to Audacity.".into());
             return;
         }
         self.is_busy = true;
@@ -538,7 +577,7 @@ impl VriprApp {
                 (false, true)  => artist,
                 (true,  false) => album,
                 (true,  true)  => {
-                    self.log_messages.push(
+                    self.push_log(
                         "⚠ Set Artist and/or Album in the apply-all strip before fetching.".into()
                     );
                     return;
@@ -547,7 +586,7 @@ impl VriprApp {
         };
 
         if self.config.discogs_token.is_empty() {
-            self.log_messages.push("⚠ Discogs token not set — open Settings.".into());
+            self.push_log("⚠ Discogs token not set — open Settings.".into());
             return;
         }
 
@@ -562,7 +601,7 @@ impl VriprApp {
                 "https://api.discogs.com/database/search?q={}&type=release&per_page=10&token=***",
                 discogs_encode_query(&query)
             );
-            self.log_messages.push(format!("Discogs URL: {}", masked));
+            self.push_log(format!("Discogs URL: {}", masked));
         }
 
         self.rt.spawn(async move {
@@ -585,7 +624,7 @@ impl VriprApp {
 
     fn fetch_discogs_by_catno(&mut self, catno: String, ctx: egui::Context) {
         if self.config.discogs_token.is_empty() {
-            self.log_messages.push("⚠ Discogs token not set — open Settings.".into());
+            self.push_log("⚠ Discogs token not set — open Settings.".into());
             return;
         }
         if self.is_busy { return; }
@@ -595,7 +634,7 @@ impl VriprApp {
         let token = self.config.discogs_token.clone();
         let tx    = self.worker_tx.clone();
 
-        self.log_messages.push(format!("Searching Discogs by catalogue number: {}", catno));
+        self.push_log(format!("Searching Discogs by catalogue number: {}", catno));
 
         self.rt.spawn(async move {
             match discogs_search_by_catno(&catno, &token, 10).await {
@@ -626,7 +665,7 @@ impl VriprApp {
         let selected_side = self.selected_side;
 
         self.is_busy = true;
-        self.log_messages.push(format!(
+        self.push_log(format!(
             "Fetching release #{}: {} — {}",
             release_id, c.artist, c.album
         ));
@@ -696,20 +735,15 @@ impl VriprApp {
                 }
             };
 
-            let tracks: Vec<TrackMeta> = if valid_durs == 0 {
-                let _ = tx.send(WorkerMessage::Log(
-                    "No Discogs durations available — generating placeholder tracks.".into()
-                ));
-                split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
+            // Count how many disc_refs have valid durations (after side filtering)
+            let valid_disc_durs = disc_refs.iter()
+                .filter(|t| t.duration_secs.map(|d| d > 0.0).unwrap_or(false))
+                .count();
 
-            } else if let Some(path) = audio_path.filter(|p| p.exists()) {
-                let _ = tx.send(WorkerMessage::Log(
-                    format!("Full-file silence scan: {}", path.display())
-                ));
-
+            let tracks: Vec<TrackMeta> = if let Some(path) = audio_path.filter(|p| p.exists()) {
+                // === Audio file available — always attempt detection ===
                 let expected = disc_refs.len();
 
-                // Warn if expecting many tracks — one-side-per-session is strongly recommended
                 if expected > 8 {
                     let _ = tx.send(WorkerMessage::Log(format!(
                         "⚠  Expecting {} tracks — detection is most reliable with one vinyl \
@@ -719,111 +753,162 @@ impl VriprApp {
                     )));
                 }
 
-                // Retry schedule: progressively shorter silence thresholds.
-                // IMPORTANT: gap_fill must always be < min_silence or it will
-                // bridge the very gap we're trying to detect.
-                // Format: (min_silence_secs, min_sound_secs, gap_fill_secs)
-                let retry_params: &[(f64, f64, f64)] = &[
-                    (0.70, 15.0, 0.25),
-                    (0.40, 10.0, 0.15),
-                    (0.20,  5.0, 0.07),
-                    (0.10,  3.0, 0.04),
-                    (0.05,  2.0, 0.02),
-                ];
-
+                // Step 1: duration-guided detection when every expected track has a known duration.
+                // Uses Discogs durations as anchors to locate real silence boundaries —
+                // more reliable than a blind scan when timing information is available.
                 let mut best_detected: Vec<crate::audio::DetectedTrack> = Vec::new();
-                let mut best_diag: Option<crate::audio::DetectorDiagnostics> = None;
 
-                let use_spectral = config.detection_method == DetectionMethod::Spectral;
-
-                for (attempt, &(min_sil, min_snd, gap_fill)) in retry_params.iter().enumerate() {
-                    let det_cfg = DetectorConfig {
-                        threshold_db:               config.silence_threshold_db,
-                        adaptive:                   config.use_adaptive_threshold,
-                        adaptive_margin_db:         config.adaptive_margin_db,
-                        min_silence_secs:           min_sil,
-                        min_sound_secs:             min_snd,
-                        gap_fill_secs:              gap_fill,
-                        window_ms:                  50,
-                        spectral_flatness_threshold: config.spectral_flatness_threshold,
-                        ..DetectorConfig::default()
+                if valid_disc_durs == expected && expected > 0 {
+                    let disc_durs: Vec<f64> = disc_refs.iter()
+                        .map(|t| t.duration_secs.unwrap_or(0.0))
+                        .collect();
+                    let guided_cfg = GuidedDetectorConfig {
+                        threshold_db:       config.silence_threshold_db,
+                        adaptive:           config.use_adaptive_threshold,
+                        adaptive_margin_db: config.adaptive_margin_db,
+                        ..GuidedDetectorConfig::default()
                     };
-
-                    let method_label = if use_spectral { "spectral" } else { "RMS" };
-                    if attempt == 0 {
-                        let _ = tx.send(WorkerMessage::Log(format!(
-                            "Scanning audio ({} detector)…", method_label
-                        )));
-                    }
-
                     let path2 = path.clone();
                     let tx2   = tx.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        let mut last_pct = 0u8;
-                        let progress_cb = &mut |p: f64| {
-                            let pct = (p * 100.0) as u8;
-                            if pct >= last_pct + 10 {
-                                last_pct = pct;
-                                let _ = tx2.send(WorkerMessage::Log(format!(
-                                    "  decoding… {}%", pct
-                                )));
-                            }
-                        };
-                        if use_spectral {
-                            detect_tracks_spectral(&path2, &det_cfg, progress_cb)
-                        } else {
-                            detect_tracks(&path2, &det_cfg, progress_cb)
-                        }
+                    let _ = tx.send(WorkerMessage::Log(
+                        "Guided detection: using Discogs durations as anchors…".into()
+                    ));
+                    let guided_result = tokio::task::spawn_blocking(move || {
+                        detect_tracks_guided(&path2, &disc_durs, &guided_cfg, &mut |_| {})
                     }).await;
 
-                    match result {
-                        Ok(Ok((detected, diag))) => {
-                            let found = detected.len();
-                            if attempt == 0 {
-                                let _ = tx.send(WorkerMessage::Log(format!(
-                                    "Scan: {} region(s) in {:.0}s (threshold {:.1} dB{})",
-                                    found, diag.total_secs, diag.threshold_db,
-                                    diag.noise_floor_db
-                                        .map(|nf| format!(", noise floor {:.1} dB", nf))
-                                        .unwrap_or_default(),
-                                )));
-                            } else {
-                                let _ = tx.send(WorkerMessage::Log(format!(
-                                    "  retry {}: min_silence={:.2}s gap_fill={:.2}s min_sound={:.0}s → {} region(s)",
-                                    attempt, min_sil, gap_fill, min_snd, found
-                                )));
-                            }
-
+                    match guided_result {
+                        Ok(Ok(detected)) if detected.len() == expected => {
+                            let _ = tx.send(WorkerMessage::Log(format!(
+                                "  ✓ guided: {} track(s) located", expected
+                            )));
                             best_detected = detected;
-                            best_diag     = Some(diag);
-
-                            if found == expected {
-                                break; // exact match — done
-                            }
+                        }
+                        Ok(Ok(detected)) => {
+                            let _ = tx.send(WorkerMessage::Log(format!(
+                                "  guided: {} vs {} expected — falling back to scan",
+                                detected.len(), expected
+                            )));
                         }
                         Ok(Err(e)) => {
-                            let _ = tx.send(WorkerMessage::Log(
-                                format!("Silence scan failed ({}), using Discogs durations.", e)
-                            ));
-                            break;
+                            let _ = tx.send(WorkerMessage::Log(format!(
+                                "  guided failed ({}), falling back to scan", e
+                            )));
                         }
                         Err(e) => {
-                            let _ = tx.send(WorkerMessage::Log(
-                                format!("Scan task error ({}), using Discogs durations.", e)
-                            ));
-                            break;
+                            let _ = tx.send(WorkerMessage::Log(format!(
+                                "  guided task error ({}), falling back to scan", e
+                            )));
                         }
                     }
                 }
 
+                // Step 2: blind retry loop if guided didn't nail the count.
+                if best_detected.len() != expected {
+                    // Retry schedule: progressively shorter silence thresholds.
+                    // gap_fill must always be < min_silence.
+                    // Format: (min_silence_secs, min_sound_secs, gap_fill_secs)
+                    let retry_params: &[(f64, f64, f64)] = &[
+                        (0.70, 15.0, 0.25),
+                        (0.40, 10.0, 0.15),
+                        (0.20,  5.0, 0.07),
+                        (0.10,  3.0, 0.04),
+                        (0.05,  2.0, 0.02),
+                    ];
+                    let det_method = config.detection_method.clone();
+
+                    for (attempt, &(min_sil, min_snd, gap_fill)) in retry_params.iter().enumerate() {
+                        let det_cfg = DetectorConfig {
+                            threshold_db:                config.silence_threshold_db,
+                            adaptive:                    config.use_adaptive_threshold,
+                            adaptive_margin_db:          config.adaptive_margin_db,
+                            min_silence_secs:            min_sil,
+                            min_sound_secs:              min_snd,
+                            gap_fill_secs:               gap_fill,
+                            window_ms:                   50,
+                            spectral_flatness_threshold: config.spectral_flatness_threshold,
+                            ..DetectorConfig::default()
+                        };
+
+                        if attempt == 0 {
+                            let _ = tx.send(WorkerMessage::Log(format!(
+                                "Scanning audio ({} detector)…", det_method.display_str()
+                            )));
+                        }
+
+                        let path2  = path.clone();
+                        let tx2    = tx.clone();
+                        let method = det_method.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            let mut last_pct = 0u8;
+                            let progress_cb = &mut |p: f64| {
+                                let pct = (p * 100.0) as u8;
+                                if pct >= last_pct + 10 {
+                                    last_pct = pct;
+                                    let _ = tx2.send(WorkerMessage::Log(format!(
+                                        "  decoding… {}%", pct
+                                    )));
+                                }
+                            };
+                            match method {
+                                DetectionMethod::Spectral => detect_tracks_spectral(&path2, &det_cfg, progress_cb),
+                                DetectionMethod::Hmm      => detect_tracks_hmm(&path2, &det_cfg, progress_cb),
+                                DetectionMethod::Rms      => detect_tracks(&path2, &det_cfg, progress_cb),
+                            }
+                        }).await;
+
+                        match result {
+                            Ok(Ok((detected, diag))) => {
+                                let found = detected.len();
+                                if attempt == 0 {
+                                    let _ = tx.send(WorkerMessage::Log(format!(
+                                        "Scan: {} region(s) in {:.0}s (threshold {:.1} dB{})",
+                                        found, diag.total_secs, diag.threshold_db,
+                                        diag.noise_floor_db
+                                            .map(|nf| format!(", noise floor {:.1} dB", nf))
+                                            .unwrap_or_default(),
+                                    )));
+                                } else {
+                                    let _ = tx.send(WorkerMessage::Log(format!(
+                                        "  retry {}: min_silence={:.2}s gap_fill={:.2}s min_sound={:.0}s → {} region(s)",
+                                        attempt, min_sil, gap_fill, min_snd, found
+                                    )));
+                                }
+                                best_detected = detected;
+                                if found == expected { break; }
+                            }
+                            Ok(Err(e)) => {
+                                let _ = tx.send(WorkerMessage::Log(
+                                    format!("Silence scan failed: {}", e)
+                                ));
+                                break;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerMessage::Log(
+                                    format!("Scan task error: {}", e)
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Step 3: resolve count and select final output.
                 if best_detected.is_empty() {
-                    let _ = tx.send(WorkerMessage::Log(
-                        "No sound regions detected — using Discogs durations.".into()
-                    ));
-                    split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
+                    if valid_disc_durs > 0 {
+                        let _ = tx.send(WorkerMessage::Log(
+                            "No sound regions detected — using Discogs durations.".into()
+                        ));
+                        split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
+                    } else {
+                        let _ = tx.send(WorkerMessage::Log(
+                            "No sound regions detected and no durations — creating title placeholders.".into()
+                        ));
+                        title_only_tracks(&disc_refs, &release, &config.track_number_format)
+                    }
                 } else {
                     let found = best_detected.len();
-                    let use_discogs_fallback = if found == expected {
+                    let use_duration_fallback = if found == expected {
                         let _ = tx.send(WorkerMessage::Log(format!(
                             "  ✓ {} track(s) matched Discogs count", found
                         )));
@@ -836,53 +921,40 @@ impl VriprApp {
                         best_detected.truncate(expected);
                         false
                     } else {
-                        // Too few detected after all retries — Discogs durations are more reliable.
+                        // Too few after all attempts — durations are more reliable than partial detection.
                         let _ = tx.send(WorkerMessage::Log(format!(
-                            "  ⚠ only {} of {} tracks detected after all retries — \
-                             falling back to Discogs durations",
-                            found, expected
+                            "  ⚠ only {} of {} tracks found after all attempts — {}",
+                            found, expected,
+                            if valid_disc_durs > 0 { "falling back to Discogs durations" }
+                            else { "using title placeholders" }
                         )));
                         true
                     };
 
-                    if use_discogs_fallback {
-                        split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
-                    } else {
-                    // Pair detected regions with Discogs metadata in order.
-                    best_detected.iter().enumerate().map(|(i, dt)| {
-                        let dr = disc_refs.get(i);
-                        let track_number = match config.track_number_format {
-                            crate::config::TrackNumberFormat::Alpha =>
-                                dr.map(|t| format!("{}{}", t.side, t.number))
-                                  .unwrap_or_else(|| (i + 1).to_string()),
-                            crate::config::TrackNumberFormat::Numeric =>
-                                (i + 1).to_string(),
-                        };
-                        TrackMeta {
-                            index:              i + 1,
-                            start:              dt.start,
-                            end:                dt.end,
-                            title:              dr.map(|t| t.title.clone()).unwrap_or_default(),
-                            track_number,
-                            album:              release.album.clone(),
-                            album_artist:       release.album_artist.clone(),
-                            artist:             release.album_artist.clone(),
-                            year:               release.year.clone(),
-                            genre:              release.genre.clone(),
-                            discogs_release_id: release.release_id.clone(),
-                            country:            release.country.clone(),
-                            catalog:            release.catalog.clone(),
-                            label:              release.label.clone(),
-                            ..Default::default()
+                    if use_duration_fallback {
+                        if valid_disc_durs > 0 {
+                            split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
+                        } else {
+                            title_only_tracks(&disc_refs, &release, &config.track_number_format)
                         }
-                    }).collect()
-                    } // end else-not-fallback
+                    } else {
+                        pair_detected_with_meta(&best_detected, &disc_refs, &release, &config.track_number_format)
+                    }
                 }
+
             } else {
-                let _ = tx.send(WorkerMessage::Log(
-                    "No audio file found — using Discogs durations for track times.".into()
-                ));
-                split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
+                // === No audio file ===
+                if valid_disc_durs > 0 {
+                    let _ = tx.send(WorkerMessage::Log(
+                        "No audio file — using Discogs durations for track times.".into()
+                    ));
+                    split_by_discogs_durations_fmt(&disc_refs, &release, 0.0, 2.0, &config.track_number_format)
+                } else {
+                    let _ = tx.send(WorkerMessage::Log(
+                        "No audio file and no durations — creating title-only placeholders.".into()
+                    ));
+                    title_only_tracks(&disc_refs, &release, &config.track_number_format)
+                }
             };
 
             // --- 5. Auto-log duration comparison ---
@@ -908,7 +980,7 @@ impl VriprApp {
             let new_tracks = split_by_discogs_durations_fmt(
                 &disc_refs, &release, 0.0, 2.0, &self.config.track_number_format
             );
-            self.log_messages.push(format!(
+            self.push_log(format!(
                 "Generated {} track(s) from Discogs durations.",
                 new_tracks.len()
             ));
@@ -918,7 +990,7 @@ impl VriprApp {
             let disc_refs: Vec<&crate::metadata::DiscogsTrack> =
                 release.tracks.iter().collect();
             assign_discogs_titles(&mut self.tracks, &disc_refs, &release);
-            self.log_messages.push(format!(
+            self.push_log(format!(
                 "Assigned Discogs metadata to {} track(s).",
                 self.tracks.len().min(disc_refs.len())
             ));
@@ -932,7 +1004,7 @@ impl VriprApp {
         let label = side.map_or_else(|| "All sides".to_string(), |s| format!("Side {}", s));
 
         let Some(release) = &self.discogs_release else {
-            self.log_messages.push(format!("Side → {} (no release loaded; fetch a release first)", label));
+            self.push_log(format!("Side → {} (no release loaded; fetch a release first)", label));
             return;
         };
 
@@ -942,12 +1014,12 @@ impl VriprApp {
         };
 
         if disc_refs.is_empty() {
-            self.log_messages.push(format!("Side {}: no tracks found in release", side.unwrap_or('?')));
+            self.push_log(format!("Side {}: no tracks found in release", side.unwrap_or('?')));
             return;
         }
 
         crate::metadata::assign_discogs_titles(&mut self.tracks, &disc_refs, release);
-        self.log_messages.push(format!(
+        self.push_log(format!(
             "Side filter → {} — reassigned metadata for {} track(s) from {} Discogs track(s).",
             label,
             self.tracks.len().min(disc_refs.len()),
@@ -957,11 +1029,11 @@ impl VriprApp {
 
     fn rescan(&mut self, ctx: egui::Context) {
         let Some(wav_path) = self.analysis_wav.clone() else {
-            self.log_messages.push("No analysis WAV — connect first.".into());
+            self.push_log("No analysis WAV — connect first.".into());
             return;
         };
         if !wav_path.exists() {
-            self.log_messages.push("Analysis WAV not found — reconnect to re-export.".into());
+            self.push_log("Analysis WAV not found — reconnect to re-export.".into());
             return;
         }
 
@@ -992,7 +1064,7 @@ impl VriprApp {
             ];
 
             let mut best: Vec<crate::audio::DetectedTrack> = Vec::new();
-            let use_spectral = config.detection_method == DetectionMethod::Spectral;
+            let det_method = config.detection_method.clone();
 
             for (attempt, &(min_sil, min_snd, gap_fill)) in retry_params.iter().enumerate() {
                 let det_cfg = DetectorConfig {
@@ -1006,15 +1078,15 @@ impl VriprApp {
                     spectral_flatness_threshold: config.spectral_flatness_threshold,
                     ..DetectorConfig::default()
                 };
-                let method_label = if use_spectral { "spectral" } else { "RMS" };
                 if attempt == 0 {
                     let _ = tx.send(WorkerMessage::Log(format!(
-                        "Re-scanning audio ({} detector)…", method_label
+                        "Re-scanning audio ({} detector)…", det_method.display_str()
                     )));
                 }
 
-                let path2 = wav_path.clone();
-                let tx2   = tx.clone();
+                let path2  = wav_path.clone();
+                let tx2    = tx.clone();
+                let method = det_method.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let mut last_pct = 0u8;
                     let progress_cb = &mut |p: f64| {
@@ -1026,10 +1098,10 @@ impl VriprApp {
                             )));
                         }
                     };
-                    if use_spectral {
-                        detect_tracks_spectral(&path2, &det_cfg, progress_cb)
-                    } else {
-                        detect_tracks(&path2, &det_cfg, progress_cb)
+                    match method {
+                        DetectionMethod::Spectral => detect_tracks_spectral(&path2, &det_cfg, progress_cb),
+                        DetectionMethod::Hmm      => detect_tracks_hmm(&path2, &det_cfg, progress_cb),
+                        DetectionMethod::Rms      => detect_tracks(&path2, &det_cfg, progress_cb),
                     }
                 }).await;
 
@@ -1150,32 +1222,32 @@ impl VriprApp {
     }
 
     fn run_diagnostics(&mut self) {
-        self.log_messages.push("=== Diagnostics ===".into());
-        self.log_messages.push(format!(
+        self.push_log("=== Diagnostics ===".into());
+        self.push_log(format!(
             "Config path: {:?}",
             crate::config::config_path()
         ));
-        self.log_messages.push(format!(
+        self.push_log(format!(
             "Pipe paths: {:?} | {:?}",
             AudacityPipe::pipe_paths().0,
             AudacityPipe::pipe_paths().1
         ));
-        self.log_messages.push(format!(
+        self.push_log(format!(
             "Pipes exist: {}",
             AudacityPipe::check_pipes()
         ));
-        self.log_messages.push(format!("Pipe connected: {}", self.pipe_connected));
-        self.log_messages.push(format!("Tracks loaded: {}", self.tracks.len()));
-        self.log_messages.push(format!("Export dir: {:?}", self.config.export_dir));
-        self.log_messages.push(format!(
+        self.push_log(format!("Pipe connected: {}", self.pipe_connected));
+        self.push_log(format!("Tracks loaded: {}", self.tracks.len()));
+        self.push_log(format!("Export dir: {:?}", self.config.export_dir));
+        self.push_log(format!(
             "Discogs token set: {}",
             !self.config.discogs_token.is_empty()
         ));
-        self.log_messages.push(format!(
+        self.push_log(format!(
             "Cover art: {}",
             if self.cover_texture.is_some() { "loaded" } else { "none" }
         ));
-        self.log_messages.push("=== End Diagnostics ===".into());
+        self.push_log("=== End Diagnostics ===".into());
     }
 
     fn show_waveform_panel(&mut self, ctx: &egui::Context) {
@@ -1209,10 +1281,9 @@ impl VriprApp {
         if let Some(vi) = evt.toggle_pin {
             if let Some(track) = self.tracks.get_mut(vi) {
                 track.pinned = !track.pinned;
-                self.log_messages.push(format!(
-                    "Track {}: {}", track.index,
-                    if track.pinned { "pinned 📌" } else { "unpinned" }
-                ));
+                let msg = format!("Track {}: {}", track.index,
+                    if track.pinned { "pinned 📌" } else { "unpinned" });
+                self.push_log(msg);
             }
         }
 
@@ -1251,7 +1322,7 @@ impl VriprApp {
                         prev.end = new_start;
                     }
                 }
-                self.log_messages.push(format!(
+                self.push_log(format!(
                     "Track {} start → {}", self.tracks[vi].index, fmt_secs(new_start)
                 ));
             }
@@ -1267,7 +1338,7 @@ impl VriprApp {
                         next.start = new_end + 1.0;
                     }
                 }
-                self.log_messages.push(format!(
+                self.push_log(format!(
                     "Track {} end → {}", self.tracks[vi].index, fmt_secs(new_end)
                 ));
             }
@@ -1284,19 +1355,20 @@ impl VriprApp {
         // Play region (right-click menu)
         if let Some((start, end)) = evt.play_region {
             if self.pipe_connected {
-                if let Ok(mut pipe) = self.pipe.lock() {
-                    match pipe.play_region(start, end) {
-                        Ok(_) => {
-                            let dur = std::time::Duration::from_secs_f64(end - start + 0.5);
-                            self.play_end = Some(std::time::Instant::now() + dur);
-                        }
-                        Err(e) => {
-                            self.log_messages.push(format!("⚠ Playback failed: {e}"));
-                        }
+                let play_result = self.pipe.lock().ok()
+                    .map(|mut pipe| pipe.play_region(start, end));
+                match play_result {
+                    Some(Ok(_)) => {
+                        let dur = std::time::Duration::from_secs_f64(end - start + 0.5);
+                        self.play_end = Some(std::time::Instant::now() + dur);
                     }
+                    Some(Err(e)) => {
+                        self.push_log(format!("⚠ Playback failed: {e}"));
+                    }
+                    None => {}
                 }
             } else {
-                self.log_messages.push("⚠ Connect to Audacity to use playback".into());
+                self.push_log("⚠ Connect to Audacity to use playback".into());
             }
         }
     }
@@ -1338,7 +1410,7 @@ impl VriprApp {
                     ToolbarAction::ClearTracks   => {
                         self.tracks.clear();
                         self.selected_rows.clear();
-                        self.log_messages.push("Tracks cleared.".into());
+                        self.push_log("Tracks cleared.".into());
                     }
                     ToolbarAction::FetchDiscogsRelease => self.fetch_discogs_release(ctx.clone()),
                     ToolbarAction::SideChanged(side)  => self.apply_side_filter(side),
@@ -1554,7 +1626,7 @@ impl VriprApp {
                 let removed = self.tracks.remove(idx);
                 self.selected_rows.remove(&idx);
                 self.editing_track_index = None;
-                self.log_messages.push(format!("Removed track: {}", removed.title));
+                self.push_log(format!("Removed track: {}", removed.title));
                 for (i, t) in self.tracks.iter_mut().enumerate() {
                     t.index = i + 1;
                 }
@@ -1583,6 +1655,8 @@ impl VriprApp {
                 apply_catalog,
             );
 
+            let catno_for_fetch = apply_catalog.trim().to_string();
+
             if strip.apply_clicked {
                 for track in &mut self.tracks {
                     if !apply_artist.is_empty()       { track.artist       = apply_artist.clone(); }
@@ -1591,11 +1665,11 @@ impl VriprApp {
                     if !apply_genre.is_empty()        { track.genre        = apply_genre.clone(); }
                     if !apply_year.is_empty()         { track.year         = apply_year.clone(); }
                 }
-                self.log_messages.push("Applied values to all tracks.".into());
+                self.push_log("Applied values to all tracks.".into());
             }
 
             if strip.fetch_by_catno {
-                let catno = apply_catalog.trim().to_string();
+                let catno = catno_for_fetch;
                 if !catno.is_empty() {
                     self.fetch_discogs_by_catno(catno, ctx.clone());
                 }
@@ -1734,7 +1808,7 @@ impl VriprApp {
                         track_number: index.to_string(),
                         ..Default::default()
                     };
-                    self.log_messages.push(format!(
+                    self.push_log(format!(
                         "Added track: {} ({})",
                         track.title, track.display_time()
                     ));
@@ -1798,6 +1872,42 @@ fn parse_mmss(s: &str) -> Option<f64> {
     }
 }
 
+/// Pair a slice of detected audio regions with Discogs track metadata, in order.
+fn pair_detected_with_meta(
+    detected: &[crate::audio::DetectedTrack],
+    disc_refs: &[&crate::metadata::DiscogsTrack],
+    release: &crate::metadata::DiscogsRelease,
+    track_number_format: &crate::config::TrackNumberFormat,
+) -> Vec<crate::track::TrackMeta> {
+    detected.iter().enumerate().map(|(i, dt)| {
+        let dr = disc_refs.get(i);
+        let track_number = match track_number_format {
+            crate::config::TrackNumberFormat::Alpha =>
+                dr.map(|t| format!("{}{}", t.side, t.number))
+                  .unwrap_or_else(|| (i + 1).to_string()),
+            crate::config::TrackNumberFormat::Numeric =>
+                (i + 1).to_string(),
+        };
+        crate::track::TrackMeta {
+            index:              i + 1,
+            start:              dt.start,
+            end:                dt.end,
+            title:              dr.map(|t| t.title.clone()).unwrap_or_default(),
+            track_number,
+            album:              release.album.clone(),
+            album_artist:       release.album_artist.clone(),
+            artist:             release.album_artist.clone(),
+            year:               release.year.clone(),
+            genre:              release.genre.clone(),
+            discogs_release_id: release.release_id.clone(),
+            country:            release.country.clone(),
+            catalog:            release.catalog.clone(),
+            label:              release.label.clone(),
+            ..Default::default()
+        }
+    }).collect()
+}
+
 /// A text field that displays and accepts time in MM:SS.ss format.
 /// Stores seconds as f64. Returns the inner response.
 fn time_text_edit(
@@ -1822,10 +1932,14 @@ fn time_text_edit(
         if let Some(parsed) = parse_mmss(&buf) {
             *value = parsed;
         }
-        buf = fmt_mmss(*value);
+        // Clear the buffer so next render shows the live value
         ui.data_mut(|d| d.remove::<String>(id));
-    } else {
+    } else if resp.has_focus() {
+        // Only persist the buffer while the field is actively being edited
         ui.data_mut(|d| d.insert_temp(id, buf));
+    } else {
+        // Not focused — drop any stale buffer so switching tracks always shows fresh data
+        ui.data_mut(|d| d.remove::<String>(id));
     }
 
     resp

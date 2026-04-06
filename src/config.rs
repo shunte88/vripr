@@ -47,6 +47,10 @@ pub enum DetectionMethod {
     /// Spectral flatness scanner — distinguishes music (tonal) from groove noise (flat).
     /// Better for noisy pressings where silence is loud but spectrally different from music.
     Spectral,
+    /// Hidden Markov Model over (RMS, flatness) features.
+    /// Self-estimates emission parameters from the audio, then uses Viterbi decoding.
+    /// More robust to short dips in level mid-track than threshold-based methods.
+    Hmm,
 }
 
 impl DetectionMethod {
@@ -54,11 +58,13 @@ impl DetectionMethod {
         match self {
             DetectionMethod::Rms      => "rms",
             DetectionMethod::Spectral => "spectral",
+            DetectionMethod::Hmm      => "hmm",
         }
     }
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "spectral" => DetectionMethod::Spectral,
+            "hmm"      => DetectionMethod::Hmm,
             _          => DetectionMethod::Rms,
         }
     }
@@ -66,6 +72,7 @@ impl DetectionMethod {
         match self {
             DetectionMethod::Rms      => "RMS (default)",
             DetectionMethod::Spectral => "Spectral (noise-aware)",
+            DetectionMethod::Hmm      => "HMM (adaptive)",
         }
     }
 }

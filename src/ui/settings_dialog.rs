@@ -248,7 +248,9 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
                 .on_hover_text(
                     "RMS: classic energy-based detector — fast, works on clean pressings.\n\
                      Spectral: combines energy + spectral flatness — better for noisy pressings \
-                     where inter-track groove noise is loud but spectrally different from music."
+                     where inter-track groove noise is loud but spectrally different from music.\n\
+                     HMM: Hidden Markov Model over both features — adapts to each recording, \
+                     handles momentary level dips without splitting tracks."
                 );
             egui::ComboBox::from_id_source("detection_method_combo")
                 .selected_text(config.detection_method.display_str())
@@ -262,6 +264,11 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
                         &mut config.detection_method,
                         DetectionMethod::Spectral,
                         DetectionMethod::Spectral.display_str(),
+                    );
+                    ui.selectable_value(
+                        &mut config.detection_method,
+                        DetectionMethod::Hmm,
+                        DetectionMethod::Hmm.display_str(),
                     );
                 });
             ui.end_row();

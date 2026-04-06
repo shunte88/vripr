@@ -674,6 +674,190 @@ fn guide_find_offset(
 }
 
 // ---------------------------------------------------------------------------
+// HMM detector
+// ---------------------------------------------------------------------------
+
+/// 2-state Hidden Markov Model detector over (RMS dB, spectral flatness) features.
+///
+/// States: SILENCE (0) and SOUND (1).  Emission parameters are self-estimated from the
+/// recording — the bottom 15 % of frames by RMS model the silence state, the top 40 %
+/// model the sound state.  Viterbi decoding then produces a hard state sequence, which
+/// is post-processed identically to the other detectors.
+///
+/// Advantages over threshold detectors:
+/// - State persistence: momentary level dips mid-track don't create spurious boundaries.
+/// - Soft feature combination: both RMS and flatness contribute probabilistically.
+/// - No fixed threshold to hand-tune — adapts to each recording.
+pub fn detect_tracks_hmm(
+    path: &Path,
+    cfg: &DetectorConfig,
+    progress: &mut impl FnMut(f64),
+) -> Result<(Vec<DetectedTrack>, DetectorDiagnostics)> {
+    let window_secs = cfg.window_ms as f64 / 1000.0;
+    let (windows, sample_rate, total_frames) =
+        decode_spectral_windows(path, window_secs, progress)?;
+
+    let total_secs = total_frames as f64 / sample_rate as f64;
+    let n = windows.len();
+    if n == 0 {
+        return Err(anyhow!("Audio file produced no samples"));
+    }
+
+    // --- Convert RMS to dB for Gaussian modeling ---
+    let rms_db: Vec<f64> = windows.iter().map(|(r, _)| linear_to_db(*r)).collect();
+    let flatness: Vec<f64> = windows.iter().map(|(_, f)| *f).collect();
+
+    // --- Self-estimate emission parameters ---
+    // Sort frame indices by RMS to partition silence vs sound frames.
+    let mut sorted_idx: Vec<usize> = (0..n).collect();
+    sorted_idx.sort_by(|&a, &b| rms_db[a].partial_cmp(&rms_db[b]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n_sil = ((n as f64 * 0.15) as usize).max(1);
+    let n_snd = ((n as f64 * 0.40) as usize).max(1);
+    let sil_idx = &sorted_idx[..n_sil];
+    let snd_idx = &sorted_idx[n - n_snd..];
+
+    // Helper: mean + std with a minimum floor to avoid degenerate distributions.
+    let mean_std = |vals: &[f64], floor: f64| -> (f64, f64) {
+        let m = vals.iter().sum::<f64>() / vals.len() as f64;
+        let var = vals.iter().map(|x| (x - m).powi(2)).sum::<f64>() / vals.len() as f64;
+        (m, var.sqrt().max(floor))
+    };
+
+    let sil_rms_vals: Vec<f64> = sil_idx.iter().map(|&i| rms_db[i]).collect();
+    let snd_rms_vals: Vec<f64> = snd_idx.iter().map(|&i| rms_db[i]).collect();
+    let (mu_sil_rms, sig_sil_rms) = mean_std(&sil_rms_vals, 2.0); // floor 2 dB
+    let (mu_snd_rms, sig_snd_rms) = mean_std(&snd_rms_vals, 2.0);
+
+    let sil_flat_vals: Vec<f64> = sil_idx.iter().map(|&i| flatness[i]).collect();
+    let snd_flat_vals: Vec<f64> = snd_idx.iter().map(|&i| flatness[i]).collect();
+    let (mu_sil_flat, sig_sil_flat) = mean_std(&sil_flat_vals, 0.08);
+    let (mu_snd_flat, sig_snd_flat) = mean_std(&snd_flat_vals, 0.08);
+
+    debug!(
+        "HMM: sil rms={:.1}±{:.1}dB flat={:.2}±{:.2} | \
+              snd rms={:.1}±{:.1}dB flat={:.2}±{:.2}",
+        mu_sil_rms, sig_sil_rms, mu_sil_flat, sig_sil_flat,
+        mu_snd_rms, sig_snd_rms, mu_snd_flat, sig_snd_flat,
+    );
+
+    // --- Transition log-probabilities ---
+    // Derive from the configured min_silence / min_sound durations so that the HMM
+    // "expects" segments at least that long before switching state.
+    let p_sil_to_snd = (1.0 / (cfg.min_silence_secs / window_secs).max(2.0)).min(0.5);
+    let p_snd_to_sil = (1.0 / (cfg.min_sound_secs  / window_secs).max(2.0)).min(0.5);
+    let log_t = [
+        [(1.0 - p_sil_to_snd).ln(), p_sil_to_snd.ln()], // from silence
+        [p_snd_to_sil.ln(), (1.0 - p_snd_to_sil).ln()], // from sound
+    ];
+
+    // --- Per-frame emission log-probabilities [silence, sound] ---
+    let log_gauss = |x: f64, mu: f64, sig: f64| -> f64 {
+        let z = (x - mu) / sig;
+        -0.5 * z * z - sig.ln()
+    };
+    let emit: Vec<[f64; 2]> = (0..n).map(|i| {
+        let r = rms_db[i];
+        let f = flatness[i];
+        [
+            log_gauss(r, mu_sil_rms, sig_sil_rms) + log_gauss(f, mu_sil_flat, sig_sil_flat),
+            log_gauss(r, mu_snd_rms, sig_snd_rms) + log_gauss(f, mu_snd_flat, sig_snd_flat),
+        ]
+    }).collect();
+
+    // --- Viterbi (rolling, 2 states) ---
+    // Start strongly biased toward silence (recordings typically begin with lead-in).
+    let mut prev = [emit[0][0], emit[0][1] - 20.0];
+    let mut back: Vec<[u8; 2]> = Vec::with_capacity(n);
+    back.push([0, 1]);
+
+    for t in 1..n {
+        let e = emit[t];
+        let mut curr = [0.0f64; 2];
+        let mut bp   = [0u8; 2];
+        for s in 0..2 {
+            let from_sil = prev[0] + log_t[0][s];
+            let from_snd = prev[1] + log_t[1][s];
+            if from_sil >= from_snd {
+                curr[s] = from_sil + e[s];
+                bp[s] = 0;
+            } else {
+                curr[s] = from_snd + e[s];
+                bp[s] = 1;
+            }
+        }
+        prev = curr;
+        back.push(bp);
+    }
+
+    // Backtrace
+    let mut states = vec![0u8; n];
+    states[n - 1] = if prev[1] > prev[0] { 1 } else { 0 };
+    for t in (0..n - 1).rev() {
+        states[t] = back[t + 1][states[t + 1] as usize];
+    }
+
+    // --- Extract SOUND runs as candidate track regions ---
+    let mut sound_regions: Vec<(f64, f64)> = Vec::new();
+    let mut in_sound = false;
+    let mut sound_start = 0.0f64;
+    for (i, &s) in states.iter().enumerate() {
+        let t = i as f64 * window_secs;
+        match (in_sound, s) {
+            (false, 1) => { in_sound = true;  sound_start = t; }
+            (true,  0) => { in_sound = false; sound_regions.push((sound_start, t)); }
+            _          => {}
+        }
+    }
+    if in_sound {
+        sound_regions.push((sound_start, total_secs));
+    }
+    debug!("HMM raw regions: {}", sound_regions.len());
+
+    // --- Post-processing (same pipeline as other detectors) ---
+    let sound_regions = merge_gaps(sound_regions, cfg.gap_fill_secs);
+    let sound_regions = merge_gaps(sound_regions, cfg.min_silence_secs);
+    let sound_regions: Vec<(f64, f64)> = sound_regions
+        .into_iter()
+        .filter(|(s, e)| (e - s) >= cfg.min_sound_secs)
+        .collect();
+
+    let mut tracks: Vec<DetectedTrack> = sound_regions
+        .into_iter()
+        .map(|(s, e)| DetectedTrack {
+            start: (s - cfg.pre_padding).max(0.0),
+            end:   (e + cfg.post_padding).min(total_secs),
+        })
+        .collect();
+
+    // Resolve any padding overlaps
+    for i in 1..tracks.len() {
+        if tracks[i].start < tracks[i - 1].end {
+            let mid = (tracks[i - 1].end + tracks[i].start) / 2.0;
+            tracks[i - 1].end = mid;
+            tracks[i].start   = mid;
+        }
+    }
+
+    let (threshold_db, noise_floor_db) = if cfg.adaptive {
+        let rms_lin: Vec<f64> = windows.iter().map(|(r, _)| *r).collect();
+        let nf    = adaptive_noise_floor(&rms_lin);
+        let nf_db = linear_to_db(nf);
+        (nf_db + cfg.adaptive_margin_db, Some(nf_db))
+    } else {
+        (cfg.threshold_db, None)
+    };
+
+    Ok((tracks, DetectorDiagnostics {
+        threshold_db,
+        noise_floor_db,
+        total_secs,
+        n_windows: n,
+        window_secs,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 

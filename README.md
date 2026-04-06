@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="Rust 1.75+"/>
+  <img src="https://img.shields.io/badge/rust-1.87%2B-orange" alt="Rust 1.87+"/>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey" alt="Platform"/>
   <img src="version.svg" alt="Version"/>
@@ -29,9 +29,9 @@ VRipr sits alongside Audacity while you rip a vinyl record. It:
 
 1. **Connects** to Audacity via the scripting pipe and exports the current project to a clean analysis WAV — capturing any edits you've already made (needle-drop removal, fades, etc.)
 2. **Fetches** the album's track listing and durations from Discogs
-3. **Detects** track boundaries with a multi-pass silence scanner — either classic RMS energy or a spectral-flatness mode for noisy pressings — automatically retrying with shorter gap thresholds until the count matches Discogs
-4. **Shows** an interactive waveform with draggable track markers so you can fine-tune any boundaries the algorithm gets wrong
-5. **Sets labels** in Audacity for a final visual review, then **exports** each track as a tagged FLAC/MP3/WAV/OGG with full metadata including a `DISCOGS_RELEASEID` custom tag and `folder.jpg` cover art
+3. **Detects** track boundaries using one of three algorithms — RMS energy, Spectral flatness, or an adaptive HMM — with multi-pass retries and Discogs-guided anchoring when durations are available
+4. **Shows** an interactive waveform with draggable track markers and a right-click context menu for auditioning and pinning boundaries in Audacity
+5. **Sets labels** in Audacity for a final visual review, then **exports** each track as a tagged FLAC/MP3/WAV/OGG with full metadata including multi-value `GENRE` and `ARTIST` tags, a `DISCOGS_RELEASEID` custom tag, and `folder.jpg` cover art
 
 ---
 
@@ -72,7 +72,7 @@ After clicking **Set Labels**, Audacity shows a label track with the detected tr
 | Requirement | Notes |
 |---|---|
 | **Audacity 3.x** | With `mod-script-pipe` enabled — see below |
-| **Rust 1.75+** | Build-time only; no runtime dependency |
+| **Rust 1.87+** | Build-time only; no runtime dependency |
 | **Discogs account** | Free personal access token required |
 
 ### Enabling mod-script-pipe in Audacity
@@ -141,15 +141,15 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 | **Export Format** | FLAC (default), MP3, WAV, OGG |
 | **Export Directory** | Root output folder; the template is joined to this path |
 | **Path Template** | Relative path template for exported files — see [Path Template](#path-template) below |
-| **Default Comments** | Comment tag embedded in all exported files; overridden per-track in the Comments column |
+| **Default Comments** | Comment tag embedded in all exported files; overridden per-track in the edit panel |
 | **Silence Threshold** | dB level below which audio is considered silence (first detection pass) |
 | **Min inter-track silence** | Shortest gap that registers as a track boundary (first pass; retries shorten this automatically) |
 | **Min track duration** | Regions shorter than this are discarded as noise (first pass; retries lower this automatically) |
 | **Adaptive threshold** | Measures the recording's noise floor and sets the threshold automatically |
-| **Detection Method** | `RMS` (default) or `Spectral` — see [Detection algorithm](#detection-algorithm) |
+| **Detection Method** | `RMS`, `Spectral`, or `HMM` — see [Detection algorithm](#detection-algorithm) |
 | **Flatness threshold** | Spectral mode only: flatness above this is treated as noise (0.5–0.99, default 0.85) |
 | **Track Number Format** | Alpha (A1, B2 …) for vinyl positions or Numeric (1, 2, 3 …) |
-| **Genre Map File** | Path to a custom `genre.dat` file — see [Genre normalisation](#genre-normalisation) below. Leave empty to use the built-in mappings. |
+| **Genre Map File** | Path to a custom `genre.dat` file — see [Genre normalisation](#genre-normalisation) below |
 
 ---
 
@@ -195,6 +195,20 @@ To activate a custom file: open **Settings → Genre Map File**, click **…**, 
 
 ---
 
+## Multi-value artist tags
+
+A release may credit multiple artists on a single track, or an artist may be known by more than one name. VRipr supports this by treating the **Artist** field as a semicolon-delimited list:
+
+```
+Daniel Mana;Mana
+```
+
+On export, each entry is written as a separate `ARTIST` tag — players that support multi-value tags (foobar2000, beets, Picard, Kodi, Plex…) will index and display all contributors. The **Album Artist** field is treated identically.
+
+Enter multiple artists in the edit panel using `;` as the delimiter. No sanitisation map is applied — the values are written exactly as entered after splitting and trimming whitespace.
+
+---
+
 ## Workflow
 
 ### 1. Record and edit in Audacity
@@ -209,16 +223,36 @@ Click **Connect** in the toolbar. VRipr opens the Audacity scripting pipe, expor
 
 Fill in **Artist** and **Album** in the Apply-to-all strip and click **📀 Fetch Release**. Choose the correct release from the Discogs picker — use the 🌐 button to verify on the Discogs website if unsure.
 
-VRipr runs silence detection against the analysis WAV, using up to five automatic retries with progressively shorter gap thresholds until the detected track count matches Discogs. It logs each pass so you can see what happened.
+VRipr then runs track detection (see [Detection algorithm](#detection-algorithm) below). The log panel shows what happened at each step.
+
+If the release has no track durations (titles only), VRipr still populates the track table with placeholder entries — all timings are set to zero and can be adjusted manually in the edit panel.
 
 ### 4. Review the waveform
 
-The waveform panel shows coloured regions for each detected track. If any boundary is wrong:
+The track table's **Time** column shows `start–end (duration)` at a glance.
+
+The waveform panel shows coloured regions for each detected track. The amplitude colour gradient — teal for quiet passages, through green and yellow to red at loud peaks — gives an immediate sense of the dynamic shape of each track. If any boundary is wrong:
 
 - **Drag** the boundary line left or right to adjust it. Adjacent track boundaries move together.
-- **Right-click** a track region to **📌 Pin** it — pinned tracks are preserved when you re-scan.
+- **Right-click** anywhere in the waveform to open the context menu:
+  - **▶ Play Track N** — sends a `SelectTime:` + `Play:` command to Audacity to audition that region
+  - **↦ Pin start here** / **↤ Pin end here** — moves the boundary to the click position
+  - **📌 Pin/Unpin** — locks a track so it is preserved on re-scan
+  - **⏹ Stop playback** — stops Audacity playback
 - **Drag empty space** to draw a selection, then click **➕ Add Track** to insert a new track at exactly that position.
 - Click **🔄 Re-scan** to run detection again while keeping pinned tracks.
+
+#### Editing track timing
+
+Double-click any row in the track table to open the **edit panel**. Three time fields are available:
+
+| Field | Behaviour |
+|---|---|
+| **Start** | Edit in `MM:SS.ss` or raw seconds. Clamped to 0 ↔ End−0.1 s. |
+| **End** | Edit in `MM:SS.ss` or raw seconds. Automatically pushes the next track's Start forward if they would overlap. |
+| **Duration** | Edit in `MM:SS.ss` or raw seconds. Sets End = Start + Duration; cascades to the next track with the same overlap rule. |
+
+All three fields accept `MM:SS.ss` notation and display it consistently after editing.
 
 ### Processing sides separately (the prescribed workflow)
 
@@ -253,7 +287,7 @@ Click **💾 Export All**. VRipr:
 
 - Validates that label count and titles match (non-blocking warning if not)
 - Selects each time region in Audacity and exports it via `Export2:`
-- Writes full ID3/Vorbis/FLAC tags including `DISCOGS_RELEASEID`
+- Writes full ID3/Vorbis/FLAC tags including `DISCOGS_RELEASEID`, multi-value `GENRE` and `ARTIST`
 - Deposits `folder.jpg` in the album directory after the first track completes
 
 Output structure follows your Path Template. The default template produces:
@@ -315,7 +349,11 @@ With ISO country code and catalogue number:
 
 ## Detection algorithm
 
-VRipr ships two track-boundary detectors. Both operate on the full analysis WAV (not Audacity's `LabelSounds`) and share the same multi-pass retry loop.
+VRipr ships three track-boundary detectors plus a duration-guided pass. All share the same multi-pass retry loop.
+
+### Duration-guided pre-pass
+
+When every expected track has a duration in the Discogs data, VRipr runs a **guided** detection first: it uses the Discogs durations as timing anchors, scanning only the narrow windows around where each track boundary is expected to be. This is faster and more reliable than a blind full-file scan when the timing data is good. If the guided pass produces the exact expected track count it is used directly; otherwise VRipr falls back to the blind retry loop below.
 
 ### RMS (default)
 
@@ -339,19 +377,37 @@ For each 50 ms window the detector computes:
 1. **RMS** — as in the energy-only scanner
 2. **Spectral flatness** via FFT (Hann-windowed, zero-padded to the next power of two, positive-frequency half-spectrum). A ±2-window (≈250 ms) rolling average smooths the flatness signal before thresholding.
 
-A frame is classified as *between tracks* if:
-- Its RMS falls below the energy threshold (ordinary silence), **or**
-- Its RMS is above the threshold *and* its smoothed flatness exceeds the flatness threshold (energetic surface noise)
+A frame is classified as *between tracks* if its RMS falls below the energy threshold (ordinary silence), **or** its flatness exceeds the flatness threshold while energy is still present (energetic surface noise).
 
-Everything downstream — gap-fill, minimum silence, minimum track duration, multi-pass retry, padding, de-overlap — is identical to the RMS detector.
+**When to use it:** if your pressing is noisy, the RMS detector reports more tracks than expected, and lowering the threshold starts eating into quiet musical passages. The flatness threshold defaults to 0.85.
 
-**When to use it:** if your pressing is noisy, the RMS detector reports more tracks than expected (it mistakes surface noise for music), and lowering the threshold further starts eating into quiet musical passages — switch to Spectral. The flatness threshold defaults to 0.85; lower it slightly if real music is being cut, raise it if surface noise is still leaking through.
+### HMM (adaptive)
 
-**Implementation:** pure Rust via `rustfft` — no system libraries, no C dependencies. Works identically on Linux, macOS, and Windows.
+A two-state Hidden Markov Model over `(RMS dB, spectral flatness)` features. Unlike the threshold-based detectors, the HMM learns emission parameters from the recording itself:
 
-### Shared retry loop
+- The **bottom 15 %** of frames by RMS are treated as silence examples → Gaussian model for the SILENCE state
+- The **top 40 %** by RMS are treated as music examples → Gaussian model for the SOUND state
+- Transition probabilities are derived from the configured minimum silence / minimum track duration
 
-If the detected count doesn't match Discogs, both detectors retry up to four more times, progressively shortening the minimum silence and track duration each pass, until the count matches or all passes are exhausted. The gap-fill threshold is always kept below the minimum silence threshold to prevent the filler from bridging the very gaps it's trying to detect.
+Viterbi decoding finds the globally most-likely sequence of SILENCE/SOUND states. Because the HMM assigns a cost to switching states, momentary level dips mid-track — a quiet passage, a sudden dynamic contrast — no longer produce spurious track splits. The same post-processing (gap-fill, minimum duration, de-overlap) runs on the extracted sound regions.
+
+**When to use it:** when RMS and Spectral both split tracks incorrectly at quiet passages and manual threshold tuning isn't converging. The HMM needs no threshold configuration — it adapts to each recording.
+
+**Implementation:** pure Rust, no additional dependencies. Uses the same FFT-based feature extraction as the Spectral detector.
+
+### Shared retry loop and fallbacks
+
+If the detected count doesn't match Discogs, all detectors retry up to four more times, progressively shortening the minimum silence and minimum track duration each pass.
+
+After all retries:
+
+| Outcome | Action |
+|---|---|
+| Count matches | Use detected boundaries |
+| Too many detected | Truncate to expected count (discard smallest extra regions) |
+| Too few detected | Fall back to `split_by_discogs_durations` — chain tracks by Discogs durations |
+| No audio file, durations available | Chain tracks by Discogs durations |
+| No audio file, no durations | Create title-only placeholder entries (times = 0); edit manually |
 
 ---
 
@@ -359,6 +415,7 @@ If the detected count doesn't match Discogs, both detectors retry up to four mor
 
 - VRipr uses `Export2:` via the scripting pipe — this requires Audacity 3.x with `mod-script-pipe` enabled.
 - The pipe is synchronous: VRipr waits for each command to complete before proceeding.
+- Waveform playback (`▶ Play Track`) sends `SelectTime:` + `Play:` commands to Audacity — Audacity must be open and connected for this to work.
 - Labels are written with `AddLabel:` + `SetLabel:` and verified by reading them back with `GetInfo: Type=Labels`.
 - The analysis WAV is written to `/tmp/vripr_analysis_{pid}.wav` and is safe to delete after a session.
 

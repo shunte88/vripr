@@ -7,6 +7,15 @@ use tracing::debug;
 use crate::metadata::sanitize_genres;
 use crate::track::TrackMeta;
 
+/// Split a semicolon-delimited artist string into individual, trimmed artist names.
+/// Filters out empty strings so a trailing semicolon doesn't produce a blank entry.
+fn split_artists(s: &str) -> Vec<String> {
+    s.split(';')
+     .map(|a| a.trim().to_string())
+     .filter(|a| !a.is_empty())
+     .collect()
+}
+
 /// Write all metadata tags to an exported audio file.
 ///
 /// `effective_comments` is the comment to embed — callers should resolve
@@ -36,15 +45,27 @@ pub fn write_tags(filepath: &Path, track: &TrackMeta, effective_comments: &str) 
     if !track.title.is_empty() {
         tag.set_title(track.title.clone());
     }
-    if !track.artist.is_empty() {
-        tag.set_artist(track.artist.clone());
+    // Write multi-value ARTIST tags — semicolons delimit multiple contributors
+    // (e.g. "Daniel Mana;Mana" → two separate ARTIST tags).
+    let artists = split_artists(&track.artist);
+    if !artists.is_empty() {
+        use lofty::tag::{ItemKey, ItemValue, TagItem};
+        tag.remove_key(&ItemKey::TrackArtist);
+        for a in &artists {
+            tag.push(TagItem::new(ItemKey::TrackArtist, ItemValue::Text(a.clone())));
+        }
     }
     if !track.album.is_empty() {
         tag.set_album(track.album.clone());
     }
-    if !track.album_artist.is_empty() {
-        use lofty::tag::ItemKey;
-        tag.insert_text(ItemKey::AlbumArtist, track.album_artist.clone());
+    // Write multi-value ALBUMARTIST tags with the same logic.
+    let album_artists = split_artists(&track.album_artist);
+    if !album_artists.is_empty() {
+        use lofty::tag::{ItemKey, ItemValue, TagItem};
+        tag.remove_key(&ItemKey::AlbumArtist);
+        for a in &album_artists {
+            tag.push(TagItem::new(ItemKey::AlbumArtist, ItemValue::Text(a.clone())));
+        }
     }
     if !track.discogs_release_id.is_empty() {
         use lofty::tag::ItemKey;
