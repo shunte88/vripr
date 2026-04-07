@@ -183,15 +183,18 @@ struct ExportSection {
     path_template: String,
     #[serde(default)]
     default_comments: String,
+    #[serde(default)]
+    album_name_format: String,
 }
 
 impl Default for ExportSection {
     fn default() -> Self {
         Self {
-            format:           default_format(),
-            dir:              default_export_dir_str(),
-            path_template:    default_path_template(),
-            default_comments: String::new(),
+            format:            default_format(),
+            dir:               default_export_dir_str(),
+            path_template:     default_path_template(),
+            default_comments:  String::new(),
+            album_name_format: String::new(),
         }
     }
 }
@@ -300,6 +303,7 @@ pub struct Config {
     pub export_dir: PathBuf,
     pub export_path_template: String,
     pub default_comments: String,
+    pub album_name_format: String,
     pub silence_threshold_db: f64,
     pub silence_min_duration: f64,
     pub silence_min_sound_dur: f64,
@@ -336,6 +340,7 @@ impl Config {
             export_dir:           PathBuf::from(&f.export.dir),
             export_path_template: f.export.path_template,
             default_comments:     f.export.default_comments,
+            album_name_format:    f.export.album_name_format,
             silence_threshold_db:    f.silence.threshold_db,
             silence_min_duration:    f.silence.min_duration,
             silence_min_sound_dur:   f.silence.min_sound_dur,
@@ -361,8 +366,9 @@ impl Config {
             export: ExportSection {
                 format:           self.export_format.as_str().to_string(),
                 dir:              self.export_dir.to_string_lossy().into_owned(),
-                path_template:    self.export_path_template.clone(),
-                default_comments: self.default_comments.clone(),
+                path_template:     self.export_path_template.clone(),
+                default_comments:  self.default_comments.clone(),
+                album_name_format: self.album_name_format.clone(),
             },
             silence: SilenceSection {
                 threshold_db:       self.silence_threshold_db,

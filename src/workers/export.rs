@@ -257,14 +257,12 @@ fn collapse_empty_brackets(s: &str) -> String {
     result
 }
 
-/// Expand a path template using per-track metadata tokens, returning a relative
-/// `PathBuf` (without extension). Path components are split on `/`, each segment
-/// is sanitised. Empty bracket groups are collapsed before splitting.
+/// Expand a template string using per-track metadata tokens, returning the
+/// substituted `String` with empty bracket groups collapsed.
 ///
-/// Supported tokens:
-///   `{title}`, `{artist}`, `{album}`, `{album_artist}`, `{genre}`, `{year}`,
-///   `{tracknum}`, `{composer}`, `{country}`, `{catalog}`, `{label}`, `{discogs_id}`
-fn apply_path_template(template: &str, track: &TrackMeta) -> std::path::PathBuf {
+/// This is the shared substitution core used by both the path template and the
+/// album name format.
+pub fn apply_token_string(template: &str, track: &TrackMeta) -> String {
     let tracknum = if track.track_number.is_empty() {
         "00".to_string()
     } else {
@@ -288,7 +286,25 @@ fn apply_path_template(template: &str, track: &TrackMeta) -> std::path::PathBuf 
     s = s.replace("{label}",        &track.label);
     s = s.replace("{discogs_id}",   &track.discogs_release_id);
 
-    let s = collapse_empty_brackets(&s);
+    collapse_empty_brackets(&s)
+}
+
+/// Expand a path template using per-track metadata tokens, returning a relative
+/// `PathBuf` (without extension). Path components are split on `/`, each segment
+/// is sanitised. Empty bracket groups are collapsed before splitting.
+///
+/// Supported tokens:
+///   `{title}`, `{artist}`, `{album}`, `{album_artist}`, `{genre}`, `{year}`,
+///   `{tracknum}`, `{composer}`, `{country}`, `{catalog}`, `{label}`, `{discogs_id}`
+fn apply_path_template(template: &str, track: &TrackMeta) -> std::path::PathBuf {
+    let s = apply_token_string(template, track);
+    let tracknum = if track.track_number.is_empty() {
+        "00".to_string()
+    } else {
+        track.track_number.parse::<u32>()
+            .map(|n| format!("{:02}", n))
+            .unwrap_or_else(|_| track.track_number.clone())
+    };
 
     let mut path = std::path::PathBuf::new();
     for segment in s.split('/') {
@@ -448,7 +464,16 @@ pub async fn run_export_worker(
             } else {
                 &track.comments
             };
-            if let Err(e) = write_tags(&out_path, track, effective_comments) {
+            // Apply album name format if configured; fall back to track.album.
+            let tagged_track;
+            let track_for_tags = if config.album_name_format.is_empty() {
+                track
+            } else {
+                let formatted = apply_token_string(&config.album_name_format, track);
+                tagged_track = TrackMeta { album: formatted, ..track.clone() };
+                &tagged_track
+            };
+            if let Err(e) = write_tags(&out_path, track_for_tags, effective_comments) {
                 let _ = tx.send(WorkerMessage::Log(format!(
                     "  Track {}: tagging warning: {}", track.index, e
                 )));

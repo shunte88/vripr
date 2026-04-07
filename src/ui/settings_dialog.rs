@@ -228,6 +228,48 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
             });
             ui.end_row();
 
+            ui.label("Album Name Format:")
+                .on_hover_text(
+                    "Token template written as the Album tag on every exported file.\n\
+                     Same tokens as Path Template. Leave blank to use the album name as-is.\n\
+                     Example: {album} [{country_iso}][{catalog}]"
+                );
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut config.album_name_format)
+                        .desired_width(400.0)
+                        .hint_text("{album} (leave blank to use album name unchanged)"),
+                );
+                if config.album_name_format.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(166, 173, 200),
+                        "Empty — album tag written verbatim from Discogs / track data",
+                    );
+                } else {
+                    let errors = validate_path_template(&config.album_name_format);
+                    if errors.is_empty() {
+                        // Show a live preview using a dummy track if we have no real data,
+                        // otherwise just confirm the tokens are valid.
+                        ui.colored_label(
+                            egui::Color32::from_rgb(166, 227, 161),
+                            "✓ All tokens recognised",
+                        );
+                    } else {
+                        for err in &errors {
+                            let msg = match &err.suggestion {
+                                Some(s) => format!(
+                                    "  ✗  Unknown token {{{0}}} — did you mean {{{1}}}?",
+                                    err.token, s
+                                ),
+                                None => format!("  ✗  Unknown token {{{0}}}", err.token),
+                            };
+                            ui.colored_label(egui::Color32::from_rgb(243, 139, 168), msg);
+                        }
+                    }
+                }
+            });
+            ui.end_row();
+
             ui.label("Default Comments:")
                 .on_hover_text(
                     "Written as the Comment tag on every exported file.\n\
