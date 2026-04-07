@@ -141,6 +141,7 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 | **Export Format** | FLAC (default), MP3, WAV, OGG |
 | **Export Directory** | Root output folder; the template is joined to this path |
 | **Path Template** | Relative path template for exported files — see [Path Template](#path-template) below |
+| **Album Name Format** | Token template for the Album metadata tag — see [Album Name Format](#album-name-format) below; leave blank to use the album name unchanged |
 | **Default Comments** | Comment tag embedded in all exported files; overridden per-track in the edit panel |
 | **Silence Threshold** | dB level below which audio is considered silence (first detection pass) |
 | **Min inter-track silence** | Shortest gap that registers as a track boundary (first pass; retries shorten this automatically) |
@@ -344,6 +345,24 @@ With ISO country code and catalogue number:
 → `Miles Davis/Kind of Blue [US][CL 1355]/01 - So What.flac`
 → (if country is empty) `Miles Davis/Kind of Blue [CL 1355]/01 - So What.flac`
 → UK release: `Miles Davis/Kind of Blue [GB][CL 1355]/01 - So What.flac`
+
+### Album Name Format
+
+The **Album Name Format** setting (also under Export & Detection) lets you customise the Album metadata tag written to every exported file using the same `{token}` syntax as the Path Template. Leave it blank and the album name from Discogs (or whatever you've typed in) is used verbatim. Set a format and it is expanded per-track at export time.
+
+Useful for collectors who want release context baked directly into the tag rather than only into the folder structure:
+
+```
+{album} [{country_iso}][{catalog}]
+```
+→ `Kind of Blue [GB][CBS 62066]`
+
+```
+{album} ({year})
+```
+→ `Kind of Blue (1959)`
+
+Bracket collapsing applies here too — `[{country_iso}]` disappears cleanly if the country is unknown.
 
 ---
 
