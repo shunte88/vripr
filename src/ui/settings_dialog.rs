@@ -89,6 +89,14 @@ pub fn show_settings_dialog(ctx: &Context, config: &mut Config, open: &mut bool)
                 .default_open(true)
                 .show(ui, |ui| { show_defaults_section(ui, &mut working); });
 
+                ui.add_space(8.0);
+
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Custom Tags").color(egui::Color32::from_rgb(137, 180, 250))
+                )
+                .default_open(true)
+                .show(ui, |ui| { show_custom_tags_section(ui, &mut working); });
+
                 ui.add_space(16.0);
 
                 ui.horizontal(|ui| {
@@ -430,5 +438,52 @@ fn show_defaults_section(ui: &mut Ui, config: &mut Config) {
                 }
             });
             ui.end_row();
+        });
+}
+
+fn show_custom_tags_section(ui: &mut Ui, config: &mut Config) {
+    ui.label(
+        egui::RichText::new(
+            "Up to 3 additional tags written to every exported file. \
+             Leave the name blank to skip a slot."
+        )
+        .weak()
+        .small(),
+    );
+    ui.add_space(4.0);
+
+    egui::Grid::new("custom_tags_grid")
+        .num_columns(3)
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("Tag Name").weak());
+            ui.label(egui::RichText::new("Value").weak());
+            ui.label("");
+            ui.end_row();
+
+            for i in 0..3 {
+                let hint_name = match i {
+                    0 => "e.g. REPLAYGAIN_TRACK_GAIN",
+                    1 => "e.g. REPLAYGAIN_ALBUM_GAIN",
+                    _ => "TAG_NAME",
+                };
+                ui.add(
+                    egui::TextEdit::singleline(&mut config.custom_tags[i].0)
+                        .desired_width(200.0)
+                        .hint_text(hint_name),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut config.custom_tags[i].1)
+                        .desired_width(160.0)
+                        .hint_text("value"),
+                );
+                if !config.custom_tags[i].0.is_empty()
+                    && ui.small_button("✕").on_hover_text("Clear this tag").clicked()
+                {
+                    config.custom_tags[i].0.clear();
+                    config.custom_tags[i].1.clear();
+                }
+                ui.end_row();
+            }
         });
 }

@@ -157,6 +157,24 @@ struct ConfigFile {
     silence: SilenceSection,
     #[serde(default)]
     defaults: DefaultsSection,
+    #[serde(default)]
+    custom_tags: CustomTagsSection,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct CustomTagsSection {
+    #[serde(default)]
+    tag1_name: String,
+    #[serde(default)]
+    tag1_value: String,
+    #[serde(default)]
+    tag2_name: String,
+    #[serde(default)]
+    tag2_value: String,
+    #[serde(default)]
+    tag3_name: String,
+    #[serde(default)]
+    tag3_value: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -319,6 +337,9 @@ pub struct Config {
     pub track_number_format: TrackNumberFormat,
     /// Path to a custom genre.dat file. Empty string = use the built-in mappings.
     pub custom_genre_dat: String,
+    /// Up to 3 extra tag name/value pairs written to every exported file.
+    /// Pairs where the name is empty are skipped.
+    pub custom_tags: [(String, String); 3],
 }
 
 impl Default for Config {
@@ -328,6 +349,7 @@ impl Default for Config {
             export: ExportSection::default(),
             silence: SilenceSection::default(),
             defaults: DefaultsSection::default(),
+            custom_tags: CustomTagsSection::default(),
         })
     }
 }
@@ -355,6 +377,11 @@ impl Config {
             default_year:           f.defaults.year,
             track_number_format:    TrackNumberFormat::from_str(&f.defaults.track_number_format),
             custom_genre_dat:       f.defaults.custom_genre_dat,
+            custom_tags: [
+                (f.custom_tags.tag1_name, f.custom_tags.tag1_value),
+                (f.custom_tags.tag2_name, f.custom_tags.tag2_value),
+                (f.custom_tags.tag3_name, f.custom_tags.tag3_value),
+            ],
         }
     }
 
@@ -387,6 +414,14 @@ impl Config {
                 year:                self.default_year.clone(),
                 track_number_format: self.track_number_format.as_str().to_string(),
                 custom_genre_dat:    self.custom_genre_dat.clone(),
+            },
+            custom_tags: CustomTagsSection {
+                tag1_name:  self.custom_tags[0].0.clone(),
+                tag1_value: self.custom_tags[0].1.clone(),
+                tag2_name:  self.custom_tags[1].0.clone(),
+                tag2_value: self.custom_tags[1].1.clone(),
+                tag3_name:  self.custom_tags[2].0.clone(),
+                tag3_value: self.custom_tags[2].1.clone(),
             },
         }
     }

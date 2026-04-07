@@ -473,7 +473,7 @@ pub async fn run_export_worker(
                 tagged_track = TrackMeta { album: formatted, ..track.clone() };
                 &tagged_track
             };
-            if let Err(e) = write_tags(&out_path, track_for_tags, effective_comments) {
+            if let Err(e) = write_tags(&out_path, track_for_tags, effective_comments, &config.custom_tags) {
                 let _ = tx.send(WorkerMessage::Log(format!(
                     "  Track {}: tagging warning: {}", track.index, e
                 )));

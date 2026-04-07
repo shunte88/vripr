@@ -54,7 +54,15 @@ fn split_artists(s: &str) -> Vec<String> {
 ///
 /// `effective_comments` is the comment to embed — callers should resolve
 /// this as: `track.comments` if non-empty, else `config.default_comments`.
-pub fn write_tags(filepath: &Path, track: &TrackMeta, effective_comments: &str) -> Result<()> {
+///
+/// `extra_tags` is a slice of `(name, value)` pairs written as freeform tags
+/// using `ItemKey::Unknown`. Pairs with an empty name are silently skipped.
+pub fn write_tags(
+    filepath: &Path,
+    track: &TrackMeta,
+    effective_comments: &str,
+    extra_tags: &[(String, String)],
+) -> Result<()> {
     debug!("Writing tags to {:?}", filepath);
 
     let mut tagged_file = Probe::open(filepath)
@@ -147,6 +155,12 @@ pub fn write_tags(filepath: &Path, track: &TrackMeta, effective_comments: &str) 
     if !track.catalog.is_empty() {
         use lofty::tag::ItemKey;
         tag.insert_text(ItemKey::Unknown("CATALOGNUMBER".to_string()), track.catalog.clone());
+    }
+    for (name, value) in extra_tags {
+        if !name.is_empty() {
+            use lofty::tag::ItemKey;
+            tag.insert_text(ItemKey::Unknown(name.clone()), value.clone());
+        }
     }
 
     tagged_file.save_to_path(filepath, lofty::config::WriteOptions::default())
