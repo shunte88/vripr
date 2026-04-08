@@ -354,8 +354,43 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
                         DetectionMethod::Hmm,
                         DetectionMethod::Hmm.display_str(),
                     );
+                    ui.selectable_value(
+                        &mut config.detection_method,
+                        DetectionMethod::Onnx,
+                        DetectionMethod::Onnx.display_str(),
+                    );
                 });
             ui.end_row();
+
+            if config.detection_method == DetectionMethod::Onnx {
+                ui.label("ONNX Model:")
+                    .on_hover_text(
+                        "Path to a .onnx model file.\n\
+                         Supports Mel-CNN (VRipr spec) and Silero-VAD v4 — auto-detected.\n\
+                         Leave blank if you have not yet configured a model."
+                    );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut config.onnx_model_path)
+                            .desired_width(260.0)
+                            .hint_text("path/to/model.onnx"),
+                    );
+                    if ui.small_button("…").on_hover_text("Browse for .onnx file").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("ONNX model", &["onnx"])
+                            .pick_file()
+                        {
+                            config.onnx_model_path = path.to_string_lossy().into_owned();
+                        }
+                    }
+                    if !config.onnx_model_path.is_empty()
+                        && ui.small_button("✕").on_hover_text("Clear model path").clicked()
+                    {
+                        config.onnx_model_path.clear();
+                    }
+                });
+                ui.end_row();
+            }
 
             if config.detection_method == DetectionMethod::Spectral {
                 ui.label("Flatness threshold:")
@@ -435,6 +470,35 @@ fn show_defaults_section(ui: &mut Ui, config: &mut Config) {
                     && ui.small_button("✕").on_hover_text("Revert to built-in").clicked()
                 {
                     config.custom_genre_dat.clear();
+                }
+            });
+            ui.end_row();
+
+            ui.label("Extra UI Font:")
+                .on_hover_text(
+                    "Optional extra font loaded as a Unicode fallback for the UI.\n\
+                     Useful if a script you need isn't covered by system Noto fonts.\n\
+                     Supports .ttf and .otf. Leave blank to rely on auto-discovery.\n\
+                     Requires restart to take effect."
+                );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut config.extra_ui_font)
+                        .desired_width(220.0)
+                        .hint_text("Auto-discover (default)"),
+                );
+                if ui.small_button("…").on_hover_text("Browse for a font file").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Font", &["ttf", "otf"])
+                        .pick_file()
+                    {
+                        config.extra_ui_font = path.to_string_lossy().into_owned();
+                    }
+                }
+                if !config.extra_ui_font.is_empty()
+                    && ui.small_button("✕").on_hover_text("Remove extra font").clicked()
+                {
+                    config.extra_ui_font.clear();
                 }
             });
             ui.end_row();

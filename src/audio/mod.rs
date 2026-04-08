@@ -37,6 +37,9 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use std::path::Path;
 use tracing::{debug, info};
 
+pub mod onnx_detect;
+pub use onnx_detect::{detect_tracks_onnx, OnnxDetectorConfig};
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------

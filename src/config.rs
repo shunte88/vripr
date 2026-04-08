@@ -85,6 +85,8 @@ pub enum DetectionMethod {
     /// Self-estimates emission parameters from the audio, then uses Viterbi decoding.
     /// More robust to short dips in level mid-track than threshold-based methods.
     Hmm,
+    /// ONNX model inference — Mel-CNN or Silero-VAD, auto-detected from model inputs.
+    Onnx,
 }
 
 impl DetectionMethod {
@@ -93,12 +95,14 @@ impl DetectionMethod {
             DetectionMethod::Rms      => "rms",
             DetectionMethod::Spectral => "spectral",
             DetectionMethod::Hmm      => "hmm",
+            DetectionMethod::Onnx     => "onnx",
         }
     }
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "spectral" => DetectionMethod::Spectral,
             "hmm"      => DetectionMethod::Hmm,
+            "onnx"     => DetectionMethod::Onnx,
             _          => DetectionMethod::Rms,
         }
     }
@@ -107,6 +111,7 @@ impl DetectionMethod {
             DetectionMethod::Rms      => "RMS (default)",
             DetectionMethod::Spectral => "Spectral (noise-aware)",
             DetectionMethod::Hmm      => "HMM (adaptive)",
+            DetectionMethod::Onnx     => "ONNX (AI model)",
         }
     }
 }
@@ -233,6 +238,8 @@ struct SilenceSection {
     method: String,
     #[serde(default = "default_flatness_threshold")]
     flatness_threshold: f64,
+    #[serde(default)]
+    onnx_model_path: String,
 }
 
 impl Default for SilenceSection {
@@ -245,6 +252,7 @@ impl Default for SilenceSection {
             adaptive_margin_db: default_adaptive_margin_db(),
             method:             default_detection_method_str(),
             flatness_threshold: default_flatness_threshold(),
+            onnx_model_path:    String::new(),
         }
     }
 }
@@ -265,6 +273,8 @@ struct DefaultsSection {
     track_number_format: String,
     #[serde(default)]
     custom_genre_dat: String,
+    #[serde(default)]
+    extra_ui_font: String,
 }
 
 impl Default for DefaultsSection {
@@ -277,6 +287,7 @@ impl Default for DefaultsSection {
             year:                String::new(),
             track_number_format: default_track_number_format(),
             custom_genre_dat:    String::new(),
+            extra_ui_font:       String::new(),
         }
     }
 }
@@ -329,6 +340,8 @@ pub struct Config {
     pub adaptive_margin_db: f64,
     pub detection_method: DetectionMethod,
     pub spectral_flatness_threshold: f64,
+    /// Path to an ONNX model file. Empty = ONNX detection unavailable.
+    pub onnx_model_path: String,
     pub default_artist: String,
     pub default_album: String,
     pub default_album_artist: String,
@@ -337,6 +350,9 @@ pub struct Config {
     pub track_number_format: TrackNumberFormat,
     /// Path to a custom genre.dat file. Empty string = use the built-in mappings.
     pub custom_genre_dat: String,
+    /// Path to an extra font file loaded as a Unicode fallback (highest priority).
+    /// Leave empty to rely solely on auto-discovered system fonts.
+    pub extra_ui_font: String,
     /// Up to 3 extra tag name/value pairs written to every exported file.
     /// Pairs where the name is empty are skipped.
     pub custom_tags: [(String, String); 3],
@@ -370,6 +386,7 @@ impl Config {
             adaptive_margin_db:      f.silence.adaptive_margin_db,
             detection_method:        DetectionMethod::from_str(&f.silence.method),
             spectral_flatness_threshold: f.silence.flatness_threshold,
+            onnx_model_path:         f.silence.onnx_model_path,
             default_artist:         f.defaults.artist,
             default_album:          f.defaults.album,
             default_album_artist:   f.defaults.album_artist,
@@ -377,6 +394,7 @@ impl Config {
             default_year:           f.defaults.year,
             track_number_format:    TrackNumberFormat::from_str(&f.defaults.track_number_format),
             custom_genre_dat:       f.defaults.custom_genre_dat,
+            extra_ui_font:          f.defaults.extra_ui_font,
             custom_tags: [
                 (f.custom_tags.tag1_name, f.custom_tags.tag1_value),
                 (f.custom_tags.tag2_name, f.custom_tags.tag2_value),
@@ -405,6 +423,7 @@ impl Config {
                 adaptive_margin_db: self.adaptive_margin_db,
                 method:             self.detection_method.as_str().to_string(),
                 flatness_threshold: self.spectral_flatness_threshold,
+                onnx_model_path:    self.onnx_model_path.clone(),
             },
             defaults: DefaultsSection {
                 artist:              self.default_artist.clone(),
@@ -414,6 +433,7 @@ impl Config {
                 year:                self.default_year.clone(),
                 track_number_format: self.track_number_format.as_str().to_string(),
                 custom_genre_dat:    self.custom_genre_dat.clone(),
+                extra_ui_font:       self.extra_ui_font.clone(),
             },
             custom_tags: CustomTagsSection {
                 tag1_name:  self.custom_tags[0].0.clone(),

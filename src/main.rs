@@ -43,6 +43,7 @@ mod build_info {
 mod app;
 mod audio;
 mod config;
+mod fonts;
 mod metadata;
 mod pipe;
 mod tagging;
