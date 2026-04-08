@@ -86,6 +86,8 @@ pub enum DetectionMethod {
     /// More robust to short dips in level mid-track than threshold-based methods.
     Hmm,
     /// ONNX model inference — Mel-CNN or Silero-VAD, auto-detected from model inputs.
+    /// Only available when compiled with the `onnx` feature.
+    #[cfg(feature = "onnx")]
     Onnx,
 }
 
@@ -95,6 +97,7 @@ impl DetectionMethod {
             DetectionMethod::Rms      => "rms",
             DetectionMethod::Spectral => "spectral",
             DetectionMethod::Hmm      => "hmm",
+            #[cfg(feature = "onnx")]
             DetectionMethod::Onnx     => "onnx",
         }
     }
@@ -102,6 +105,8 @@ impl DetectionMethod {
         match s.to_lowercase().as_str() {
             "spectral" => DetectionMethod::Spectral,
             "hmm"      => DetectionMethod::Hmm,
+            // If a config saved "onnx" but this build lacks the feature, fall back.
+            #[cfg(feature = "onnx")]
             "onnx"     => DetectionMethod::Onnx,
             _          => DetectionMethod::Rms,
         }
@@ -111,6 +116,7 @@ impl DetectionMethod {
             DetectionMethod::Rms      => "RMS (default)",
             DetectionMethod::Spectral => "Spectral (noise-aware)",
             DetectionMethod::Hmm      => "HMM (adaptive)",
+            #[cfg(feature = "onnx")]
             DetectionMethod::Onnx     => "ONNX (AI model)",
         }
     }

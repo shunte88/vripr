@@ -40,9 +40,10 @@ use std::path::PathBuf;
 
 use crate::audio::{
     detect_tracks, detect_tracks_guided, detect_tracks_hmm, detect_tracks_spectral,
-    detect_tracks_onnx, OnnxDetectorConfig,
     DetectorConfig, GuidedDetectorConfig,
 };
+#[cfg(feature = "onnx")]
+use crate::audio::{detect_tracks_onnx, OnnxDetectorConfig};
 use crate::config::{Config, DetectionMethod};
 use crate::metadata::{
     assign_discogs_titles, compare_duration_report, discogs_encode_query,
@@ -850,16 +851,17 @@ impl VriprApp {
                         (0.10,  3.0, 0.04),
                         (0.05,  2.0, 0.02),
                     ];
-                    let det_method      = config.detection_method.clone();
+                    let det_method = config.detection_method.clone();
+
+                    // ONNX: single-pass only — no threshold retry loop.
+                    #[cfg(feature = "onnx")]
+                    if det_method == DetectionMethod::Onnx {
                     let onnx_model_path = config.onnx_model_path.clone();
                     let onnx_cfg        = OnnxDetectorConfig {
                         min_sound_secs:   config.silence_min_sound_dur,
                         min_silence_secs: config.silence_min_duration,
                         ..OnnxDetectorConfig::default()
                     };
-
-                    // ONNX: single-pass only — no threshold retry loop.
-                    if det_method == DetectionMethod::Onnx {
                         let _ = tx.send(WorkerMessage::Log(
                             "Scanning audio (ONNX AI detector)…".to_string()
                         ));
@@ -945,8 +947,9 @@ impl VriprApp {
                             match method {
                                 DetectionMethod::Spectral => detect_tracks_spectral(&path2, &det_cfg, progress_cb),
                                 DetectionMethod::Hmm      => detect_tracks_hmm(&path2, &det_cfg, progress_cb),
-                                DetectionMethod::Rms | DetectionMethod::Onnx
-                                                      => detect_tracks(&path2, &det_cfg, progress_cb),
+                                DetectionMethod::Rms      => detect_tracks(&path2, &det_cfg, progress_cb),
+                                #[cfg(feature = "onnx")]
+                                DetectionMethod::Onnx     => detect_tracks(&path2, &det_cfg, progress_cb),
                             }
                         }).await;
 
@@ -1159,64 +1162,70 @@ impl VriprApp {
             ];
 
             let mut best: Vec<crate::audio::DetectedTrack> = Vec::new();
-            let det_method      = config.detection_method.clone();
-            let onnx_model_path = config.onnx_model_path.clone();
-            let onnx_cfg        = OnnxDetectorConfig {
-                min_sound_secs:   config.silence_min_sound_dur,
-                min_silence_secs: config.silence_min_duration,
-                ..OnnxDetectorConfig::default()
-            };
+            let det_method = config.detection_method.clone();
+            let mut onnx_handled = false;
 
-            if det_method == DetectionMethod::Onnx {
-                let _ = tx.send(WorkerMessage::Log(
-                    "Re-scanning audio (ONNX AI detector)…".to_string()
-                ));
-                if onnx_model_path.is_empty() {
+            #[cfg(feature = "onnx")]
+            {
+                let onnx_model_path = config.onnx_model_path.clone();
+                let onnx_cfg = OnnxDetectorConfig {
+                    min_sound_secs:   config.silence_min_sound_dur,
+                    min_silence_secs: config.silence_min_duration,
+                    ..OnnxDetectorConfig::default()
+                };
+                if det_method == DetectionMethod::Onnx {
+                    onnx_handled = true;
                     let _ = tx.send(WorkerMessage::Log(
-                        "⚠  No ONNX model configured — set path in Settings → Detection Method.".to_string()
+                        "Re-scanning audio (ONNX AI detector)…".to_string()
                     ));
-                } else {
-                    let path2      = wav_path.clone();
-                    let tx2        = tx.clone();
-                    let model_path = std::path::PathBuf::from(&onnx_model_path);
-                    let result = tokio::task::spawn_blocking(move || {
-                        let tx3 = tx2;
-                        let mut last_pct = 0u8;
-                        let progress_cb = &mut |p: f64| {
-                            let pct = (p * 100.0) as u8;
-                            if pct >= last_pct + 10 {
-                                last_pct = pct;
-                                let _ = tx3.send(WorkerMessage::Log(format!(
-                                    "  ONNX inference… {}%", pct
+                    if onnx_model_path.is_empty() {
+                        let _ = tx.send(WorkerMessage::Log(
+                            "⚠  No ONNX model configured — set path in Settings → Detection Method.".to_string()
+                        ));
+                    } else {
+                        let path2      = wav_path.clone();
+                        let tx2        = tx.clone();
+                        let model_path = std::path::PathBuf::from(&onnx_model_path);
+                        let result = tokio::task::spawn_blocking(move || {
+                            let tx3 = tx2;
+                            let mut last_pct = 0u8;
+                            let progress_cb = &mut |p: f64| {
+                                let pct = (p * 100.0) as u8;
+                                if pct >= last_pct + 10 {
+                                    last_pct = pct;
+                                    let _ = tx3.send(WorkerMessage::Log(format!(
+                                        "  ONNX inference… {}%", pct
+                                    )));
+                                }
+                            };
+                            detect_tracks_onnx(&path2, &model_path, &onnx_cfg, progress_cb)
+                        }).await;
+                        match result {
+                            Ok(Ok((detected, diag))) => {
+                                let _ = tx.send(WorkerMessage::Log(format!(
+                                    "ONNX re-scan: {} region(s) in {:.0}s",
+                                    detected.len(), diag.total_secs
                                 )));
+                                best = detected;
                             }
-                        };
-                        detect_tracks_onnx(&path2, &model_path, &onnx_cfg, progress_cb)
-                    }).await;
-                    match result {
-                        Ok(Ok((detected, diag))) => {
-                            let _ = tx.send(WorkerMessage::Log(format!(
-                                "ONNX re-scan: {} region(s) in {:.0}s",
-                                detected.len(), diag.total_secs
-                            )));
-                            best = detected;
-                        }
-                        Ok(Err(e)) => {
-                            let _ = tx.send(WorkerMessage::Log(format!("ONNX re-scan failed: {e}")));
-                            let _ = tx.send(WorkerMessage::WorkerFinished);
-                            ctx.request_repaint();
-                            return;
-                        }
-                        Err(e) => {
-                            let _ = tx.send(WorkerMessage::Log(format!("ONNX re-scan task error: {e}")));
-                            let _ = tx.send(WorkerMessage::WorkerFinished);
-                            ctx.request_repaint();
-                            return;
+                            Ok(Err(e)) => {
+                                let _ = tx.send(WorkerMessage::Log(format!("ONNX re-scan failed: {e}")));
+                                let _ = tx.send(WorkerMessage::WorkerFinished);
+                                ctx.request_repaint();
+                                return;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerMessage::Log(format!("ONNX re-scan task error: {e}")));
+                                let _ = tx.send(WorkerMessage::WorkerFinished);
+                                ctx.request_repaint();
+                                return;
+                            }
                         }
                     }
                 }
-            } else {
+            }
 
+            if !onnx_handled {
             for (attempt, &(min_sil, min_snd, gap_fill)) in retry_params.iter().enumerate() {
                 let det_cfg = DetectorConfig {
                     threshold_db:                config.silence_threshold_db,
@@ -1252,8 +1261,9 @@ impl VriprApp {
                     match method {
                         DetectionMethod::Spectral => detect_tracks_spectral(&path2, &det_cfg, progress_cb),
                         DetectionMethod::Hmm      => detect_tracks_hmm(&path2, &det_cfg, progress_cb),
-                        DetectionMethod::Rms | DetectionMethod::Onnx
-                                              => detect_tracks(&path2, &det_cfg, progress_cb),
+                        DetectionMethod::Rms      => detect_tracks(&path2, &det_cfg, progress_cb),
+                        #[cfg(feature = "onnx")]
+                        DetectionMethod::Onnx     => detect_tracks(&path2, &det_cfg, progress_cb),
                     }
                 }).await;
 
@@ -1284,7 +1294,7 @@ impl VriprApp {
                     }
                 }
             }
-            } // end else (non-ONNX retry loop)
+            } // end if !onnx_handled
 
             // Merge detected regions with pinned tracks.
             // For each detected region, if a pinned track overlaps it by >50%, keep the pinned.

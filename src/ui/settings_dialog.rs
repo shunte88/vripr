@@ -354,6 +354,7 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
                         DetectionMethod::Hmm,
                         DetectionMethod::Hmm.display_str(),
                     );
+                    #[cfg(feature = "onnx")]
                     ui.selectable_value(
                         &mut config.detection_method,
                         DetectionMethod::Onnx,
@@ -362,6 +363,7 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
                 });
             ui.end_row();
 
+            #[cfg(feature = "onnx")]
             if config.detection_method == DetectionMethod::Onnx {
                 ui.label("ONNX Model:")
                     .on_hover_text(

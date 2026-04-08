@@ -14,6 +14,11 @@ path = "src/main.rs"
 name = "vripr"
 path = "src/lib.rs"
 
+[features]
+# Enable ONNX-based track detection via ORT.
+# Not available on x86_64-apple-darwin (no ORT prebuilt binaries for that target).
+onnx = ["dep:ort", "dep:ndarray"]
+
 [dependencies]
 eframe = { version = "0.28", features = ["default"] }
 egui = "0.28"
@@ -35,8 +40,8 @@ tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rfd = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-ort   = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
-ndarray = "0.16"
+ort     = { version = "=2.0.0-rc.12", features = ["download-binaries"], optional = true }
+ndarray = { version = "0.16", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["user"] }

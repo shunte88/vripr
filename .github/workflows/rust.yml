@@ -22,24 +22,29 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: vripr
             asset_name: vripr-linux-x86_64
+            cargo_flags: --features onnx
 
           # macOS Apple Silicon (M1/M2 — native on macos-latest)
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: vripr
             asset_name: vripr-macos-arm64
+            cargo_flags: --features onnx
 
-          # macOS Intel (cross-compiled from arm64 runner)
+          # macOS Intel — no ORT prebuilt binaries for x86_64-apple-darwin;
+          # build without the onnx feature to keep CI green.
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: vripr
             asset_name: vripr-macos-x86_64
+            cargo_flags: ""
 
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: vripr.exe
             asset_name: vripr-windows-x86_64.exe
+            cargo_flags: --features onnx
 
     runs-on: ${{ matrix.os }}
 
@@ -71,10 +76,10 @@ jobs:
             pkg-config
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Test
-        run: cargo test --target ${{ matrix.target }}
+        run: cargo test --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
