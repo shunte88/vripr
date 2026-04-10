@@ -448,6 +448,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, code structure, a
 
 ---
 
+## Like The App - Git The Shirt
+
+Team Badger shirts and other goodies are available at [shunte88](https://www.zazzle.com/team_badger_t_shirt-235604841593837420)
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

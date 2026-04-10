@@ -33,6 +33,7 @@
 #[allow(dead_code)]
 #[allow(unused_imports)]
 pub mod export;
+pub mod training_samples;
 
 use std::sync::mpsc;
 

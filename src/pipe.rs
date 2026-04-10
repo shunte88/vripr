@@ -304,14 +304,25 @@ impl AudacityPipe {
 
     /// Export the full Audacity project (current state, including edits) to a WAV file.
     /// Used to produce a clean analysis copy that reflects any user edits (e.g. needle-drop removal).
-    pub fn export_full_wav(&mut self, path: &std::path::Path) -> Result<()> {
+    /// Export the full Audacity project to a FLAC file for analysis.
+    ///
+    /// FLAC is lossless, has no file-size limit (unlike WAV's 4 GB cap), and
+    /// produces smaller files — typically 50–60% of the equivalent WAV.
+    /// Symphonia decodes it identically to WAV for all downstream processing.
+    ///
+    /// Returns the path written.
+    pub fn export_full_flac(&mut self, flac_path: &std::path::Path) -> Result<()> {
         self.send("SelectAll:").context("SelectAll failed")?;
-        let path_str = path.to_string_lossy();
-        let cmd = format!("Export2: Filename=\"{}\" NumChannels=2", path_str);
-        debug!("export_full_wav: {}", cmd);
+        let path_str = flac_path.to_string_lossy();
+        let cmd = format!("Export2: Filename=\"{}\" NumChannels=1", path_str);
+        debug!("export_full_flac: {}", cmd);
         let (_, success) = self.send(&cmd).context("Export2 failed")?;
         if !success {
-            warn!("Export2 for analysis WAV returned failure status");
+            return Err(anyhow::anyhow!(
+                "Audacity Export2 returned failure for {:?} — \
+                 check that Audacity is not showing an error dialog.",
+                flac_path
+            ));
         }
         Ok(())
     }

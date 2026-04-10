@@ -398,8 +398,9 @@ impl VriprApp {
         let pipe = self.pipe.clone();
 
         // Use a per-process temp path so we don't collide across instances.
+        // FLAC: lossless, no 4 GB size cap, ~50% smaller than WAV.
         let wav_path = std::path::PathBuf::from(format!(
-            "/tmp/vripr_analysis_{}.wav",
+            "/tmp/vripr_analysis_{}.flac",
             std::process::id()
         ));
 
@@ -433,50 +434,53 @@ impl VriprApp {
             }
             ctx.request_repaint();
 
-            // --- 2. Export project to WAV (captures user edits, e.g. needle-drop removal) ---
-            let _ = tx.send(WorkerMessage::Log(format!(
-                "Exporting project to WAV for analysis — this may take a minute…  {}",
-                wav_path.display()
-            )));
+            // --- 2. Export project to FLAC for analysis ---
+            let _ = tx.send(WorkerMessage::Log(
+                "Exporting project to FLAC for analysis — this may take a minute…".into()
+            ));
             let export_result = tokio::task::spawn_blocking({
                 let pipe = pipe.clone();
                 let path = wav_path.clone();
                 move || {
                     let mut g = pipe.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-                    g.export_full_wav(&path)
+                    g.export_full_flac(&path)
                 }
             }).await;
 
             match export_result {
                 Ok(Ok(())) => {
-                    let _ = tx.send(WorkerMessage::Log("WAV export complete.".into()));
+                    let _ = tx.send(WorkerMessage::Log("FLAC export complete.".into()));
                 }
                 Ok(Err(e)) => {
-                    let _ = tx.send(WorkerMessage::Log(format!("WAV export failed: {e} — detection will fall back to source file.")));
+                    let _ = tx.send(WorkerMessage::Log(format!(
+                        "Export failed: {e}\n\
+                         Check that Audacity is not showing an error dialog."
+                    )));
                     let _ = tx.send(WorkerMessage::WorkerFinished);
                     ctx.request_repaint();
                     return;
                 }
                 Err(e) => {
-                    let _ = tx.send(WorkerMessage::Log(format!("WAV export task error: {e}")));
+                    let _ = tx.send(WorkerMessage::Log(format!("Export task error: {e}")));
                     let _ = tx.send(WorkerMessage::WorkerFinished);
                     ctx.request_repaint();
                     return;
                 }
             }
+            let actual_path = wav_path.clone();
             ctx.request_repaint();
 
             // --- 3. Decode waveform display data ---
             let _ = tx.send(WorkerMessage::Log("Computing waveform display…".into()));
             let wf_result = tokio::task::spawn_blocking({
-                let path = wav_path.clone();
+                let path = actual_path.clone();
                 move || crate::audio::compute_waveform_display(&path, 2000)
             }).await;
 
             match wf_result {
                 Ok(Ok((samples, duration_secs))) => {
                     let _ = tx.send(WorkerMessage::WaveformReady {
-                        path: wav_path,
+                        path: actual_path,
                         samples,
                         duration_secs,
                     });
@@ -1384,6 +1388,103 @@ impl VriprApp {
         });
     }
 
+    fn generate_samples(&mut self, ctx: egui::Context) {
+        let Some(wav_path) = self.analysis_wav.clone() else {
+            self.push_log("No analysis WAV — connect first.".into());
+            return;
+        };
+        if self.tracks.is_empty() {
+            self.push_log("No tracks detected — run detection first.".into());
+            return;
+        }
+
+        self.is_busy = true;
+        let tx     = self.worker_tx.clone();
+        let tracks = self.tracks.clone();
+        let artist = self.tracks.first()
+            .map(|t| t.artist.clone())
+            .unwrap_or_default();
+        let album  = self.tracks.first()
+            .map(|t| t.album.clone())
+            .unwrap_or_default();
+        let out_dir = crate::workers::training_samples::default_output_dir();
+
+        self.rt.spawn(async move {
+            let tx2 = tx.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::workers::training_samples::generate_training_samples(
+                    &wav_path, &tracks, &artist, &album, &out_dir, &tx2,
+                )
+            }).await;
+
+            match result {
+                Ok(Ok(n))  => { let _ = tx.send(WorkerMessage::Log(
+                    format!("Done — {} training snippets saved.", n)
+                )); }
+                Ok(Err(e)) => { let _ = tx.send(WorkerMessage::Log(
+                    format!("Sample generation failed: {}", e)
+                )); }
+                Err(e)     => { let _ = tx.send(WorkerMessage::Log(
+                    format!("Sample task error: {}", e)
+                )); }
+            }
+            let _ = tx.send(WorkerMessage::WorkerFinished);
+            ctx.request_repaint();
+        });
+    }
+
+    fn get_labels_from_audacity(&mut self, ctx: egui::Context) {
+        if !self.pipe_connected {
+            self.push_log("Not connected to Audacity.".into());
+            return;
+        }
+        if self.tracks.is_empty() {
+            self.push_log("No tracks to update.".into());
+            return;
+        }
+
+        self.is_busy = true;
+        let tx          = self.worker_tx.clone();
+        let pipe        = self.pipe.clone();
+        let mut tracks  = self.tracks.clone();
+
+        self.rt.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let mut g = pipe.lock().unwrap();
+                g.get_labels()
+            }).await;
+
+            match result {
+                Ok(Ok(labels)) => {
+                    if labels.is_empty() {
+                        let _ = tx.send(WorkerMessage::Log(
+                            "No labels found in Audacity — use Set Labels first.".into()
+                        ));
+                    } else {
+                        let updated = labels.len().min(tracks.len());
+                        for (i, (start, end, _title)) in labels.iter().enumerate().take(tracks.len()) {
+                            tracks[i].start = *start;
+                            tracks[i].end   = *end;
+                        }
+                        let _ = tx.send(WorkerMessage::Log(format!(
+                            "Updated {}/{} track boundaries from Audacity labels.",
+                            updated, tracks.len()
+                        )));
+                        let _ = tx.send(WorkerMessage::TracksDetected(tracks));
+                    }
+                }
+                Ok(Err(e)) => { let _ = tx.send(WorkerMessage::Log(
+                    format!("Get Labels failed: {}", e)
+                )); }
+                Err(e) => { let _ = tx.send(WorkerMessage::Log(
+                    format!("Get Labels task error: {}", e)
+                )); }
+            }
+            let _ = tx.send(WorkerMessage::WorkerFinished);
+            ctx.request_repaint();
+        });
+    }
+
     fn run_diagnostics(&mut self) {
         self.push_log("=== Diagnostics ===".into());
         self.push_log(format!(
@@ -1570,6 +1671,8 @@ impl VriprApp {
                         self.manual_track_open = true;
                     }
                     ToolbarAction::Rescan        => self.rescan(ctx.clone()),
+                    ToolbarAction::Samples       => self.generate_samples(ctx.clone()),
+                    ToolbarAction::GetLabels     => self.get_labels_from_audacity(ctx.clone()),
                     ToolbarAction::ClearTracks   => {
                         self.tracks.clear();
                         self.selected_rows.clear();

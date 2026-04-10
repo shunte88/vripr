@@ -62,6 +62,8 @@ pub enum ToolbarAction {
     ClearTracks,
     FetchDiscogsRelease,
     Rescan,
+    Samples,
+    GetLabels,
     /// User changed the active vinyl side filter.
     SideChanged(Option<char>),
 }
@@ -109,6 +111,27 @@ pub fn show_toolbar(ui: &mut Ui, state: &ToolbarState) -> Vec<ToolbarAction> {
                 );
             if btn.clicked() {
                 actions.push(ToolbarAction::Rescan);
+            }
+        }
+
+        // Training samples — extract ±15s snippets around all boundaries
+        {
+            let enabled = state.has_analysis_wav && state.has_tracks && !state.is_busy;
+            let btn = ui.add_enabled(enabled, egui::Button::new("🎓 Samples"))
+                .on_hover_text(
+                    "Generate 30-second training snippets (±15s) around every track \
+                     boundary and save them to /data2/vripr_training.\n\
+                     \n\
+                     Writes:\n\
+                     • s{n}_{hash}.wav — track start (silence→sound)\n\
+                     • e{n}_{hash}.wav — track end   (sound→silence)\n\
+                     • m{n}_{hash}.wav — mid-track negative (tracks ≥ 60s)\n\
+                     \n\
+                     All snippets: mono, 16 kHz, 16-bit PCM, peak-normalised.\n\
+                     Each .wav has a matching .json sidecar with boundary metadata."
+                );
+            if btn.clicked() {
+                actions.push(ToolbarAction::Samples);
             }
         }
 
@@ -212,6 +235,19 @@ pub fn show_toolbar(ui: &mut Ui, state: &ToolbarState) -> Vec<ToolbarAction> {
                 .on_hover_text("Write track labels into Audacity — review and adjust before exporting");
             if btn.clicked() {
                 actions.push(ToolbarAction::SetLabels);
+            }
+        }
+
+        // Get Labels: pull adjusted label times back from Audacity
+        {
+            let enabled = state.has_tracks && state.pipe_connected && !state.is_busy;
+            let btn = ui.add_enabled(enabled, egui::Button::new("⬇ Get Labels"))
+                .on_hover_text(
+                    "Read label positions back from Audacity and update track boundaries.\n\
+                     Use after manually adjusting labels in Audacity."
+                );
+            if btn.clicked() {
+                actions.push(ToolbarAction::GetLabels);
             }
         }
 
