@@ -282,6 +282,17 @@ Track numbers are assigned from the Discogs vinyl position (`B1`, `B2`, …) reg
 
 Click **🏷 Set Labels**. VRipr clears any existing label track in Audacity, writes new labels from the track table, then reads them back to confirm they took. Switch to Audacity for a final visual check — drag labels if needed.
 
+#### Fine-tuning boundaries in Audacity
+
+If any track boundary needs adjusting, Audacity's label editor gives you a visual waveform to work against:
+
+1. Click **🏷 Set Labels** to push the current boundaries into Audacity.
+2. Switch to Audacity. Drag the label edges left or right until each boundary sits exactly at the silence gap.
+3. Switch back to VRipr and click **⬇ Get Labels**. VRipr reads the adjusted positions back and updates the track table in place — all metadata (title, artist, album, etc.) is preserved, only the start/end times change.
+4. Repeat as needed. **Set Labels → tweak in Audacity → Get Labels** is a fast loop with no re-detection required.
+
+This is particularly useful for albums with ambiguous silence gaps, mid-track fades, or live recordings where applause bleeds into the next track.
+
 ### 6. Export
 
 Click **💾 Export All**. VRipr:
