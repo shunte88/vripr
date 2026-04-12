@@ -172,8 +172,7 @@ fn build_mel_filterbank(n_mels: usize, n_fft: usize, sr: u32) -> Vec<Vec<f32>> {
 /// Decode an audio file to mono f32 samples.
 /// Returns (samples, sample_rate).
 fn decode_mono_samples(path: &Path) -> Result<(Vec<f32>, u32)> {
-    use symphonia::core::audio::AudioBufferRef;
-    use symphonia::core::audio::Signal;
+    use symphonia::core::audio::{AudioBufferRef, SampleBuffer, Signal};
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
@@ -204,6 +203,8 @@ fn decode_mono_samples(path: &Path) -> Result<(Vec<f32>, u32)> {
     let mut samples: Vec<f32> = Vec::new();
     let track_id = track.id;
 
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
     loop {
         let packet = match format.next_packet() {
             Ok(p) if p.track_id() == track_id => p,
@@ -212,33 +213,16 @@ fn decode_mono_samples(path: &Path) -> Result<(Vec<f32>, u32)> {
             Err(symphonia::core::errors::Error::ResetRequired) => break,
             Err(e) => return Err(e.into()),
         };
-        match decoder.decode(&packet)? {
-            AudioBufferRef::F32(buf) => {
-                let ch = buf.spec().channels.count();
-                for f in 0..buf.frames() {
-                    let s: f32 = (0..ch).map(|c| buf.chan(c)[f]).sum::<f32>() / ch as f32;
-                    samples.push(s);
-                }
-            }
-            AudioBufferRef::S16(buf) => {
-                let ch = buf.spec().channels.count();
-                for f in 0..buf.frames() {
-                    let s: f32 = (0..ch).map(|c| buf.chan(c)[f] as f32).sum::<f32>()
-                        / (ch as f32 * i16::MAX as f32);
-                    samples.push(s);
-                }
-            }
-            AudioBufferRef::S32(buf) => {
-                let ch = buf.spec().channels.count();
-                for f in 0..buf.frames() {
-                    let s: f32 = (0..ch).map(|c| buf.chan(c)[f] as f32).sum::<f32>()
-                        / (ch as f32 * i32::MAX as f32);
-                    samples.push(s);
-                }
-            }
-            _ => {
-                warn!("ONNX decoder: unsupported sample format — skipping packet");
-            }
+        let decoded = decoder.decode(&packet)?;
+        let spec = *decoded.spec();
+        let cap  = decoded.capacity();
+        let sb = sample_buf.get_or_insert_with(|| SampleBuffer::new(cap as u64, spec));
+        sb.copy_interleaved_ref(decoded);
+
+        let ch = spec.channels.count();
+        for frame in sb.samples().chunks_exact(ch) {
+            let mono = frame.iter().sum::<f32>() / ch as f32;
+            samples.push(mono);
         }
     }
 

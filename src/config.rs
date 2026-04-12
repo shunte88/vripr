@@ -246,6 +246,8 @@ struct SilenceSection {
     flatness_threshold: f64,
     #[serde(default)]
     onnx_model_path: String,
+    #[serde(default = "default_onnx_music_threshold")]
+    onnx_music_threshold: f64,
 }
 
 impl Default for SilenceSection {
@@ -258,7 +260,8 @@ impl Default for SilenceSection {
             adaptive_margin_db: default_adaptive_margin_db(),
             method:             default_detection_method_str(),
             flatness_threshold: default_flatness_threshold(),
-            onnx_model_path:    String::new(),
+            onnx_model_path:      String::new(),
+            onnx_music_threshold: default_onnx_music_threshold(),
         }
     }
 }
@@ -306,7 +309,8 @@ fn default_track_number_format() -> String { "alpha".to_string() }
 
 fn default_format()         -> String { "flac".to_string() }
 fn default_detection_method_str() -> String { "rms".to_string() }
-fn default_flatness_threshold()   -> f64    { 0.85 }
+fn default_flatness_threshold()       -> f64 { 0.85 }
+fn default_onnx_music_threshold()     -> f64 { 0.5  }
 fn default_path_template() -> String {
     "{album_artist}/{album}/{tracknum} - {title}".to_string()
 }
@@ -348,6 +352,8 @@ pub struct Config {
     pub spectral_flatness_threshold: f64,
     /// Path to an ONNX model file. Empty = ONNX detection unavailable.
     pub onnx_model_path: String,
+    /// P(music) threshold for Mel-CNN / Silero-VAD; frames above this are music.
+    pub onnx_music_threshold: f64,
     pub default_artist: String,
     pub default_album: String,
     pub default_album_artist: String,
@@ -393,6 +399,7 @@ impl Config {
             detection_method:        DetectionMethod::from_str(&f.silence.method),
             spectral_flatness_threshold: f.silence.flatness_threshold,
             onnx_model_path:         f.silence.onnx_model_path,
+            onnx_music_threshold:    f.silence.onnx_music_threshold,
             default_artist:         f.defaults.artist,
             default_album:          f.defaults.album,
             default_album_artist:   f.defaults.album_artist,
@@ -429,7 +436,8 @@ impl Config {
                 adaptive_margin_db: self.adaptive_margin_db,
                 method:             self.detection_method.as_str().to_string(),
                 flatness_threshold: self.spectral_flatness_threshold,
-                onnx_model_path:    self.onnx_model_path.clone(),
+                onnx_model_path:      self.onnx_model_path.clone(),
+                onnx_music_threshold: self.onnx_music_threshold,
             },
             defaults: DefaultsSection {
                 artist:              self.default_artist.clone(),

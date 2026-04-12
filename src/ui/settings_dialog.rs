@@ -392,6 +392,19 @@ fn show_export_section(ui: &mut Ui, config: &mut Config) {
                     }
                 });
                 ui.end_row();
+
+                ui.label("Music threshold:")
+                    .on_hover_text(
+                        "P(music) cutoff — frames above this are classified as music.\n\
+                         Lower → more sensitive (may split quiet passages).\n\
+                         Higher → less sensitive (may merge adjacent tracks).\n\
+                         Start at 0.5 and tune after first run."
+                    );
+                ui.add(
+                    egui::Slider::new(&mut config.onnx_music_threshold, 0.1..=0.9)
+                        .step_by(0.05)
+                );
+                ui.end_row();
             }
 
             if config.detection_method == DetectionMethod::Spectral {

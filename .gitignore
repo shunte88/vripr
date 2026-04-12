@@ -1,6 +1,9 @@
 # Build output
 /target
 
+# training - break out as standalone project
+/tools
+
 nextsess
 bump.sh
 # Cargo lock (keep for binaries, discard for libraries — this is a binary)

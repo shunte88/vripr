@@ -862,6 +862,7 @@ impl VriprApp {
                     if det_method == DetectionMethod::Onnx {
                     let onnx_model_path = config.onnx_model_path.clone();
                     let onnx_cfg        = OnnxDetectorConfig {
+                        music_threshold:  config.onnx_music_threshold,
                         min_sound_secs:   config.silence_min_sound_dur,
                         min_silence_secs: config.silence_min_duration,
                         ..OnnxDetectorConfig::default()
