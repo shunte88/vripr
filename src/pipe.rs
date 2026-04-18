@@ -84,7 +84,17 @@ impl AudacityPipe {
 
     pub fn check_pipes() -> bool {
         let (to_path, from_path) = Self::pipe_paths();
-        to_path.exists() && from_path.exists()
+        #[cfg(windows)]
+        {
+            // Path::exists() / GetFileAttributesW returns false for \\.\pipe\ paths —
+            // named pipes aren't queryable via the normal filesystem stat. Try-open instead.
+            let _ = from_path;
+            std::fs::OpenOptions::new().write(true).open(&to_path).is_ok()
+        }
+        #[cfg(not(windows))]
+        {
+            to_path.exists() && from_path.exists()
+        }
     }
 
     pub fn is_connected(&self) -> bool {
@@ -93,6 +103,10 @@ impl AudacityPipe {
 
     /// Connect to Audacity pipes. Opens write end first, then read end.
     pub fn connect(&mut self) -> Result<()> {
+        // On Unix, named pipes are filesystem objects so Path::exists() works as a pre-check.
+        // On Windows, \\.\pipe\ paths can't be stat'd — skip the pre-flight and let the
+        // open() calls below fail with a descriptive error if Audacity isn't running.
+        #[cfg(not(windows))]
         if !Self::check_pipes() {
             return Err(anyhow!(
                 "Audacity pipe files not found at {:?} and {:?}.\n\
@@ -107,7 +121,12 @@ impl AudacityPipe {
         let to_file = std::fs::OpenOptions::new()
             .write(true)
             .open(&self.to_path)
-            .with_context(|| format!("Failed to open write pipe {:?}", self.to_path))?;
+            .with_context(|| format!(
+                "Cannot open Audacity write pipe {:?}.\n\
+                Make sure Audacity is running with mod-script-pipe enabled:\n\
+                Edit → Preferences → Modules → mod-script-pipe → Enabled, then restart Audacity.",
+                self.to_path
+            ))?;
 
         debug!("Opening read pipe: {:?}", self.from_path);
         let from_file = File::open(&self.from_path)
