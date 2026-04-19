@@ -399,10 +399,8 @@ impl VriprApp {
 
         // Use a per-process temp path so we don't collide across instances.
         // FLAC: lossless, no 4 GB size cap, ~50% smaller than WAV.
-        let wav_path = std::path::PathBuf::from(format!(
-            "/tmp/vripr_analysis_{}.flac",
-            std::process::id()
-        ));
+        let wav_path = std::env::temp_dir()
+            .join(format!("vripr_analysis_{}.flac", std::process::id()));
 
         self.rt.spawn(async move {
             // --- 1. Open the pipe ---

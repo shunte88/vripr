@@ -20,6 +20,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use dirs;
 use std::sync::mpsc;
 
 use anyhow::{Context, Result, anyhow};
@@ -300,5 +302,15 @@ fn album_hash(artist: &str, album: &str) -> String {
 
 /// Return the default training output directory.
 pub fn default_output_dir() -> PathBuf {
-    PathBuf::from("/data2/vripr_training")
+    #[cfg(windows)]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+            .join("VRipr")
+            .join("training")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/data2/vripr_training")
+    }
 }

@@ -119,8 +119,8 @@ pub fn show_toolbar(ui: &mut Ui, state: &ToolbarState) -> Vec<ToolbarAction> {
             let enabled = state.has_analysis_wav && state.has_tracks && !state.is_busy;
             let btn = ui.add_enabled(enabled, egui::Button::new("🎓 Samples"))
                 .on_hover_text(
-                    "Generate 30-second training snippets (±15s) around every track \
-                     boundary and save them to /data2/vripr_training.\n\
+                    "Generate 16-second training snippets (±8s) around every track \
+                     boundary and save them to the training output directory.\n\
                      \n\
                      Writes:\n\
                      • s{n}_{hash}.wav — track start (silence→sound)\n\

@@ -332,7 +332,9 @@ impl AudacityPipe {
     /// Returns the path written.
     pub fn export_full_flac(&mut self, flac_path: &std::path::Path) -> Result<()> {
         self.send("SelectAll:").context("SelectAll failed")?;
-        let path_str = flac_path.to_string_lossy();
+        // Forward-slash the path: Windows backslashes can be misinterpreted by
+        // Audacity's scripting parser; forward slashes work on all platforms.
+        let path_str = flac_path.to_string_lossy().replace('\\', "/");
         let cmd = format!("Export2: Filename=\"{}\" NumChannels=1", path_str);
         debug!("export_full_flac: {}", cmd);
         let (_, success) = self.send(&cmd).context("Export2 failed")?;
@@ -383,7 +385,7 @@ impl AudacityPipe {
 
     /// Export the current selection to a file.
     pub fn export_selection(&mut self, path: &std::path::Path, channels: u8) -> Result<()> {
-        let path_str = path.to_string_lossy();
+        let path_str = path.to_string_lossy().replace('\\', "/");
         let cmd = format!(
             "Export2: Filename=\"{}\" NumChannels={}",
             path_str, channels
