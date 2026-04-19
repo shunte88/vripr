@@ -6,6 +6,7 @@ description = "VRipr — Master Vinyl Rippage — Audacity assistant for digitis
 license = "MIT"
 rust-version = "1.87"
 
+
 [[bin]]
 name = "vripr"
 path = "src/main.rs"
