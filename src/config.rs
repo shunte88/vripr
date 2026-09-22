@@ -192,12 +192,24 @@ struct CustomTagsSection {
 struct ApiSection {
     #[serde(default)]
     discogs_token: String,
+    #[serde(default)]
+    acoustid_key: String,
+    #[serde(default = "default_musicbrainz_user_agent")]
+    musicbrainz_user_agent: String,
+    #[serde(default)]
+    fpcalc_path: String,
+    #[serde(default = "default_identification_confidence_threshold")]
+    identification_confidence_threshold: f32,
 }
 
 impl Default for ApiSection {
     fn default() -> Self {
         Self {
             discogs_token: String::new(),
+            acoustid_key: String::new(),
+            musicbrainz_user_agent: default_musicbrainz_user_agent(),
+            fpcalc_path: String::new(),
+            identification_confidence_threshold: default_identification_confidence_threshold(),
         }
     }
 }
@@ -318,6 +330,10 @@ fn default_threshold_db() -> f64    { -40.0 }
 fn default_min_duration() -> f64    { 1.5 }
 fn default_min_sound_dur() -> f64   { 3.0 }
 fn default_adaptive_margin_db() -> f64    { 12.0 }
+fn default_musicbrainz_user_agent() -> String {
+    format!("VRipr/{} (https://github.com/julesdg6/vripr)", env!("CARGO_PKG_VERSION"))
+}
+fn default_identification_confidence_threshold() -> f32 { 0.80 }
 
 fn default_export_dir_str() -> String {
     dirs::audio_dir()
@@ -338,6 +354,14 @@ fn default_export_dir_str() -> String {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub discogs_token: String,
+    /// AcoustID application key. Kept in the local config and never logged.
+    pub acoustid_key: String,
+    /// Contactable User-Agent required by the MusicBrainz API.
+    pub musicbrainz_user_agent: String,
+    /// Optional fpcalc executable path. Empty uses fpcalc discovered on PATH.
+    pub fpcalc_path: String,
+    /// Score at which a result is described as high confidence; it is never auto-applied.
+    pub identification_confidence_threshold: f32,
     pub export_format: ExportFormat,
     pub export_dir: PathBuf,
     pub export_path_template: String,
@@ -386,6 +410,10 @@ impl Config {
     fn from_file(f: ConfigFile) -> Self {
         Config {
             discogs_token:        f.api.discogs_token,
+            acoustid_key:         f.api.acoustid_key,
+            musicbrainz_user_agent: f.api.musicbrainz_user_agent,
+            fpcalc_path:          f.api.fpcalc_path,
+            identification_confidence_threshold: f.api.identification_confidence_threshold,
             export_format:        ExportFormat::from_str(&f.export.format),
             export_dir:           PathBuf::from(&f.export.dir),
             export_path_template: f.export.path_template,
@@ -420,6 +448,10 @@ impl Config {
         ConfigFile {
             api: ApiSection {
                 discogs_token: self.discogs_token.clone(),
+                acoustid_key: self.acoustid_key.clone(),
+                musicbrainz_user_agent: self.musicbrainz_user_agent.clone(),
+                fpcalc_path: self.fpcalc_path.clone(),
+                identification_confidence_threshold: self.identification_confidence_threshold,
             },
             export: ExportSection {
                 format:           self.export_format.as_str().to_string(),

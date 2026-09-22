@@ -74,6 +74,8 @@ After clicking **Set Labels**, Audacity shows a label track with the detected tr
 | **Audacity 3.x** | With `mod-script-pipe` enabled — see below |
 | **Rust 1.87+** | Build-time only; no runtime dependency |
 | **Discogs account** | Free personal access token required |
+| **Chromaprint** *(optional)* | `fpcalc` on your PATH to identify unknown recordings |
+| **AcoustID account** *(optional)* | Free application API key for audio identification |
 
 ### Enabling mod-script-pipe in Audacity
 
@@ -138,6 +140,10 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 | Setting | Description |
 |---|---|
 | **Discogs Token** | Personal access token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
+| **AcoustID API Key** | Application key from [acoustid.org](https://acoustid.org); enables assisted identification |
+| **fpcalc Path** | Chromaprint executable; leave blank to discover `fpcalc` on `PATH` |
+| **MusicBrainz User-Agent** | Contactable API User-Agent used for MusicBrainz lookups |
+| **High confidence** | Display threshold for identification results; all results still require confirmation |
 | **Export Format** | FLAC (default), MP3, WAV, OGG |
 | **Export Directory** | Root output folder; the template is joined to this path |
 | **Path Template** | Relative path template for exported files — see [Path Template](#path-template) below |
@@ -211,6 +217,22 @@ Enter multiple artists in the edit panel using `;` as the delimiter. No sanitisa
 ---
 
 ## Workflow
+
+### Identifying an unknown 7-inch side
+
+For a one-track-per-side 7-inch, record a side in Audacity, **Connect**, then use
+**Identify Tracks** after detection. VRipr fingerprints up to 120 seconds of each
+detected track with Chromaprint, looks it up with AcoustID, and resolves the
+recording name through MusicBrainz. Review alternatives and click **Accept** only
+for the result you trust; VRipr never silently replaces metadata, including for
+high-confidence results. Use **Fetch Release** afterwards to choose and confirm
+the exact Discogs pressing, as a fingerprint identifies a recording rather than a
+physical release.
+
+Your AcoustID key is stored only in the local VRipr config. The key and generated
+audio fingerprints are not written to VRipr logs. Fingerprints are sent to
+AcoustID solely to perform the lookup; MusicBrainz receives recording IDs, not
+audio or fingerprints.
 
 ### 1. Record and edit in Audacity
 

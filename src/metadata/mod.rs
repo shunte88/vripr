@@ -34,6 +34,7 @@
 #[allow(unused_imports)]
 pub mod discogs;
 pub mod genre;
+pub mod identify;
 
 pub use discogs::*;
 pub use genre::{reload_genre_map, sanitize_genres};

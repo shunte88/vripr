@@ -55,6 +55,7 @@ use crate::metadata::{
 use crate::pipe::AudacityPipe;
 use crate::track::TrackMeta;
 use crate::metadata::reload_genre_map;
+use crate::metadata::identify::{fingerprint_segment, identify, IdentificationCandidate};
 use crate::ui::{
     ManualTrackInput, TableAction, ToolbarAction, ToolbarState,
     show_discogs_picker, show_manual_track_dialog, show_settings_dialog,
@@ -128,6 +129,8 @@ pub struct VriprApp {
     play_end: Option<std::time::Instant>,
     /// Path to the WAV exported from Audacity on connect — used for detection.
     pub analysis_wav: Option<std::path::PathBuf>,
+    identification_results: Vec<(usize, Vec<IdentificationCandidate>)>,
+    identification_open: bool,
 }
 
 impl VriprApp {
@@ -215,6 +218,8 @@ impl VriprApp {
             waveform_selection: None,
             play_end: None,
             analysis_wav: None,
+            identification_results: Vec::new(),
+            identification_open: false,
         };
 
         // Write session separator + startup message to log file and panel.
@@ -342,6 +347,12 @@ impl VriprApp {
                     self.waveform_duration = duration_secs;
                     self.waveform_drag     = None;
                     self.is_busy           = false;
+                }
+                WorkerMessage::IdentificationReady(results) => {
+                    self.is_busy = false;
+                    self.identification_results = results;
+                    self.identification_open = true;
+                    self.push_log("Track identification complete — review matches before applying them.".into());
                 }
             }
         }
@@ -589,6 +600,7 @@ impl VriprApp {
         if self.tracks.is_empty() || !self.pipe_connected {
             return;
         }
+
         self.is_busy = true;
         let pipe         = self.pipe.clone();
         let config       = self.config.clone();
@@ -596,6 +608,70 @@ impl VriprApp {
         let tracks       = self.tracks.clone();
         let cover_bytes  = self.cover_image_bytes.clone();
         self.rt.spawn(run_export_worker(tracks, pipe, config, tx, ctx, cover_bytes));
+    }
+
+    fn identify_tracks(&mut self, ctx: egui::Context) {
+        let Some(audio_path) = self.analysis_wav.clone().filter(|path| path.exists()) else {
+            self.push_log("No analysis audio — connect to Audacity first.".into());
+            return;
+        };
+        if self.config.acoustid_key.trim().is_empty() {
+            self.push_log("⚠ AcoustID API key is not set — open Settings → API Keys.".into());
+            return;
+        }
+        if self.config.musicbrainz_user_agent.trim().is_empty() {
+            self.push_log("⚠ MusicBrainz User-Agent is required — set it in Settings → API Keys.".into());
+            return;
+        }
+        self.is_busy = true;
+        let tracks = self.tracks.clone();
+        let config = self.config.clone();
+        let tx = self.worker_tx.clone();
+        self.rt.spawn(async move {
+            let client = match reqwest::Client::builder().user_agent(&config.musicbrainz_user_agent).build() {
+                Ok(client) => client,
+                Err(_) => {
+                    let _ = tx.send(WorkerMessage::WorkerError("Could not create identification client.".into()));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            let total = tracks.len();
+            let mut results = Vec::new();
+            for (position, track) in tracks.iter().enumerate() {
+                let _ = tx.send(WorkerMessage::Progress { done: position, total });
+                let audio = audio_path.clone();
+                let fpcalc_path = config.fpcalc_path.clone();
+                let start = track.start;
+                let duration = track.duration();
+                let fingerprint = match tokio::task::spawn_blocking(move || {
+                    fingerprint_segment(&fpcalc_path, &audio, start, duration)
+                }).await {
+                    Ok(Ok(fingerprint)) => fingerprint,
+                    Ok(Err(error)) => {
+                        let _ = tx.send(WorkerMessage::Log(format!("Track {} could not be fingerprinted: {}", track.index, error)));
+                        results.push((track.index, Vec::new()));
+                        continue;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(WorkerMessage::Log(format!("Track {} fingerprint task failed.", track.index)));
+                        results.push((track.index, Vec::new()));
+                        continue;
+                    }
+                };
+                match identify(&client, &config.acoustid_key, &fingerprint, duration, &track.title, &track.artist).await {
+                    Ok(candidates) => results.push((track.index, candidates)),
+                    Err(error) => {
+                        let _ = tx.send(WorkerMessage::Log(format!("Track {} could not be identified: {}", track.index, error)));
+                        results.push((track.index, Vec::new()));
+                    }
+                }
+                let _ = tx.send(WorkerMessage::Progress { done: position + 1, total });
+            }
+            let _ = tx.send(WorkerMessage::IdentificationReady(results));
+            let _ = tx.send(WorkerMessage::WorkerFinished);
+            ctx.request_repaint();
+        });
     }
 
     fn export_selected(&mut self, ctx: egui::Context) {
@@ -1644,7 +1720,7 @@ impl VriprApp {
                 has_tracks: !self.tracks.is_empty(),
                 has_selection: !self.selected_rows.is_empty(),
                 has_discogs_release: self.discogs_release.is_some(),
-                has_analysis_wav: self.analysis_wav.as_ref().map(|p| p.exists()).unwrap_or(false),
+                has_analysis_wav: self.analysis_wav.is_some(),
                 available_sides: self.available_sides.clone(),
                 selected_side: self.selected_side,
             };
@@ -1672,6 +1748,7 @@ impl VriprApp {
                     ToolbarAction::Rescan        => self.rescan(ctx.clone()),
                     ToolbarAction::Samples       => self.generate_samples(ctx.clone()),
                     ToolbarAction::GetLabels     => self.get_labels_from_audacity(ctx.clone()),
+                    ToolbarAction::IdentifyTracks => self.identify_tracks(ctx.clone()),
                     ToolbarAction::ClearTracks   => {
                         self.tracks.clear();
                         self.selected_rows.clear();
@@ -2033,6 +2110,60 @@ impl VriprApp {
     }
 
     fn show_dialogs(&mut self, ctx: &egui::Context) {
+        if self.identification_open {
+            let mut accepted = Vec::new();
+            let mut close = false;
+            egui::Window::new("Identify Tracks")
+                .open(&mut self.identification_open)
+                .resizable(true)
+                .default_width(620.0)
+                .show(ctx, |ui| {
+                    ui.label("Matches are suggestions only. Accepting replaces only Title and Artist; use the track editor to adjust them.");
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for (track_index, candidates) in &self.identification_results {
+                            ui.separator();
+                            ui.strong(format!("Track {track_index}"));
+                            if candidates.is_empty() {
+                                ui.colored_label(egui::Color32::from_rgb(249, 226, 175), "Unmatched or an error occurred — metadata was not changed.");
+                                continue;
+                            }
+                            let best = &candidates[0];
+                            let state = if best.score >= self.config.identification_confidence_threshold {
+                                "High confidence — confirmation required"
+                            } else if candidates.len() > 1 {
+                                "Ambiguous — choose a candidate or reject"
+                            } else {
+                                "Low confidence — confirmation required"
+                            };
+                            ui.label(format!("{state} ({:.0}%)", best.score * 100.0));
+                            for candidate in candidates {
+                                ui.horizontal(|ui| {
+                                    if ui.button("Accept").clicked() {
+                                        accepted.push((*track_index, candidate.clone()));
+                                    }
+                                    ui.label(format!(
+                                        "{} — {}{}  •  {:.0}% fingerprint, {:.0}% duration",
+                                        candidate.artist, candidate.title,
+                                        if candidate.release.is_empty() { String::new() } else { format!(" ({})", candidate.release) },
+                                        candidate.fingerprint_score * 100.0,
+                                        candidate.duration_score * 100.0,
+                                    ));
+                                });
+                            }
+                        }
+                    });
+                    if ui.button("Reject all / Close").clicked() { close = true; }
+                });
+            for (track_index, candidate) in accepted {
+                if let Some(track) = self.tracks.iter_mut().find(|track| track.index == track_index) {
+                    track.title = candidate.title;
+                    track.artist = candidate.artist;
+                    self.push_log(format!("Accepted identification for track {track_index}."));
+                }
+            }
+            if close { self.identification_open = false; }
+        }
+
         // Discogs release picker
         if self.discogs_picker_open {
             if let Some(idx) = show_discogs_picker(

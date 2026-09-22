@@ -53,6 +53,7 @@ pub enum WorkerMessage {
     DiscogsSearchCandidates(Vec<crate::metadata::DiscogsCandidate>),
     CoverArtData(Vec<u8>),
     WaveformReady { path: std::path::PathBuf, samples: Vec<f32>, duration_secs: f64 },
+    IdentificationReady(Vec<(usize, Vec<crate::metadata::identify::IdentificationCandidate>)>),
 }
 
 #[derive(Debug, Default, Clone)]

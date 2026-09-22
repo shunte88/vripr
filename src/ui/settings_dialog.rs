@@ -153,6 +153,28 @@ fn show_api_keys_section(ui: &mut Ui, config: &mut Config) {
                 }
             });
             ui.end_row();
+            ui.label("AcoustID API Key:")
+                .on_hover_text("Application key from acoustid.org; it is only sent to AcoustID and never logged.");
+            ui.add(
+                egui::TextEdit::singleline(&mut config.acoustid_key)
+                    .password(true)
+                    .desired_width(290.0)
+                    .hint_text("AcoustID application key"),
+            );
+            ui.end_row();
+            ui.label("fpcalc Path:")
+                .on_hover_text("Leave empty to find fpcalc (Chromaprint) on PATH.");
+            ui.add(egui::TextEdit::singleline(&mut config.fpcalc_path)
+                .desired_width(290.0).hint_text("fpcalc (PATH)"));
+            ui.end_row();
+            ui.label("MusicBrainz User-Agent:");
+            ui.add(egui::TextEdit::singleline(&mut config.musicbrainz_user_agent)
+                .desired_width(290.0));
+            ui.end_row();
+            ui.label("High confidence:");
+            ui.add(egui::DragValue::new(&mut config.identification_confidence_threshold)
+                .range(0.0..=1.0).speed(0.01));
+            ui.end_row();
         });
 }
 
