@@ -641,11 +641,10 @@ impl VriprApp {
             for (position, track) in tracks.iter().enumerate() {
                 let _ = tx.send(WorkerMessage::Progress { done: position, total });
                 let audio = audio_path.clone();
-                let fpcalc_path = config.fpcalc_path.clone();
                 let start = track.start;
                 let duration = track.duration();
                 let fingerprint = match tokio::task::spawn_blocking(move || {
-                    fingerprint_segment(&fpcalc_path, &audio, start, duration)
+                    fingerprint_segment(&audio, start, duration)
                 }).await {
                     Ok(Ok(fingerprint)) => fingerprint,
                     Ok(Err(error)) => {

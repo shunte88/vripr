@@ -103,8 +103,21 @@ fn main() {
         value    = value,
     );
 
-    fs::write(&svg_path, svg).unwrap();
+    // Only rewrite when the badge actually changes, so an unchanged rebuild
+    // doesn't touch the file's mtime or show up as a dirty working tree.
+    let unchanged = fs::read_to_string(&svg_path).map(|current| current == svg).unwrap_or(false);
+    if !unchanged {
+        // Best-effort: the manifest directory is read-only for `cargo install`
+        // and vendored builds, where a stale badge is preferable to a failed build.
+        if let Err(error) = fs::write(&svg_path, svg) {
+            println!("cargo:warning=could not regenerate version.svg: {error}");
+        }
+    }
 
+    // `src` is listed so ordinary source edits regenerate the badge. Cargo only
+    // re-runs this script for the paths named here, so without it the badge's
+    // build date would only move when build.rs or Cargo.toml changed.
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
 }

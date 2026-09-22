@@ -1,9 +1,9 @@
 [package]
 name = "vripr"
-version = "0.2.11"
+version = "0.2.12"
 edition = "2024"
 description = "VRipr — Master Vinyl Rippage — Audacity assistant for digitising vinyl records"
-license = "MIT"
+license = "MIT|LGPL"
 rust-version = "1.87"
 
 [[bin]]
@@ -43,6 +43,7 @@ hound = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ort     = { version = "=2.0.0-rc.12", features = ["download-binaries"], optional = true }
 ndarray = { version = "0.16", optional = true }
+chromaprint-next = "0.1.0"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["user"] }

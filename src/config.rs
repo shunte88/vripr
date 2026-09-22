@@ -196,8 +196,6 @@ struct ApiSection {
     acoustid_key: String,
     #[serde(default = "default_musicbrainz_user_agent")]
     musicbrainz_user_agent: String,
-    #[serde(default)]
-    fpcalc_path: String,
     #[serde(default = "default_identification_confidence_threshold")]
     identification_confidence_threshold: f32,
 }
@@ -208,7 +206,6 @@ impl Default for ApiSection {
             discogs_token: String::new(),
             acoustid_key: String::new(),
             musicbrainz_user_agent: default_musicbrainz_user_agent(),
-            fpcalc_path: String::new(),
             identification_confidence_threshold: default_identification_confidence_threshold(),
         }
     }
@@ -358,8 +355,6 @@ pub struct Config {
     pub acoustid_key: String,
     /// Contactable User-Agent required by the MusicBrainz API.
     pub musicbrainz_user_agent: String,
-    /// Optional fpcalc executable path. Empty uses fpcalc discovered on PATH.
-    pub fpcalc_path: String,
     /// Score at which a result is described as high confidence; it is never auto-applied.
     pub identification_confidence_threshold: f32,
     pub export_format: ExportFormat,
@@ -412,7 +407,6 @@ impl Config {
             discogs_token:        f.api.discogs_token,
             acoustid_key:         f.api.acoustid_key,
             musicbrainz_user_agent: f.api.musicbrainz_user_agent,
-            fpcalc_path:          f.api.fpcalc_path,
             identification_confidence_threshold: f.api.identification_confidence_threshold,
             export_format:        ExportFormat::from_str(&f.export.format),
             export_dir:           PathBuf::from(&f.export.dir),
@@ -450,7 +444,6 @@ impl Config {
                 discogs_token: self.discogs_token.clone(),
                 acoustid_key: self.acoustid_key.clone(),
                 musicbrainz_user_agent: self.musicbrainz_user_agent.clone(),
-                fpcalc_path: self.fpcalc_path.clone(),
                 identification_confidence_threshold: self.identification_confidence_threshold,
             },
             export: ExportSection {

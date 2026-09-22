@@ -11,6 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/rust-1.87%2B-orange" alt="Rust 1.87+"/>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
+  <img src="https://img.shields.io/badge/binaries-MIT%20%2B%20LGPL--2.1%20%2B%20MPL--2.0-blue" alt="Binary licensing"/>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey" alt="Platform"/>
   <img src="version.svg" alt="Version"/>
 </p>
@@ -74,7 +75,6 @@ After clicking **Set Labels**, Audacity shows a label track with the detected tr
 | **Audacity 3.x** | With `mod-script-pipe` enabled — see below |
 | **Rust 1.87+** | Build-time only; no runtime dependency |
 | **Discogs account** | Free personal access token required |
-| **Chromaprint** *(optional)* | `fpcalc` on your PATH to identify unknown recordings |
 | **AcoustID account** *(optional)* | Free application API key for audio identification |
 
 ### Enabling mod-script-pipe in Audacity
@@ -95,12 +95,22 @@ GitHub Actions builds a native binary for every push to `main` and on every `v*`
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 | `vripr-linux-x86_64` |
-| macOS Apple Silicon | `vripr-macos-arm64` |
-| macOS Intel | `vripr-macos-x86_64` |
-| Windows x86_64 | `vripr-windows-x86_64.exe` |
+| Linux x86_64 | `vripr-linux-x86_64.tar.gz` |
+| macOS Apple Silicon | `vripr-macos-arm64.tar.gz` |
+| macOS Intel | `vripr-macos-x86_64.tar.gz` |
+| Windows x86_64 | `vripr-windows-x86_64.zip` |
 
-Download from the [Releases](../../releases) page. All binaries are self-contained — no runtime dependencies, no system libraries required.
+Download from the [Releases](../../releases) page. Each archive unpacks to a
+single directory containing the executable alongside `LICENSE`,
+`LICENSE-LGPL-2.1`, `THIRD-PARTY-NOTICES.md`, and this README — see
+[License](#license) for why the notices ship with the binary.
+
+```sh
+tar -xzf vripr-linux-x86_64.tar.gz
+sudo install -Dm755 vripr-linux-x86_64/vripr /usr/local/bin/vripr
+```
+
+All binaries are self-contained — no runtime dependencies, no system libraries required.
 
 ### Build from source
 
@@ -141,7 +151,6 @@ Config is stored at `~/.config/vripr/vripr.toml` (created automatically on first
 |---|---|
 | **Discogs Token** | Personal access token from [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
 | **AcoustID API Key** | Application key from [acoustid.org](https://acoustid.org); enables assisted identification |
-| **fpcalc Path** | Chromaprint executable; leave blank to discover `fpcalc` on `PATH` |
 | **MusicBrainz User-Agent** | Contactable API User-Agent used for MusicBrainz lookups |
 | **High confidence** | Display threshold for identification results; all results still require confirmation |
 | **Export Format** | FLAC (default), MP3, WAV, OGG |
@@ -221,9 +230,10 @@ Enter multiple artists in the edit panel using `;` as the delimiter. No sanitisa
 ### Identifying an unknown 7-inch side
 
 For a one-track-per-side 7-inch, record a side in Audacity, **Connect**, then use
-**Identify Tracks** after detection. VRipr fingerprints up to 120 seconds of each
-detected track with Chromaprint, looks it up with AcoustID, and resolves the
-recording name through MusicBrainz. Review alternatives and click **Accept** only
+**Identify Tracks** after detection. VRipr fingerprints up to 120 seconds of
+each detected track with its built-in Chromaprint implementation — no `fpcalc`
+binary required — looks it up with AcoustID, and resolves the recording name
+through MusicBrainz. Review alternatives and click **Accept** only
 for the result you trust; VRipr never silently replaces metadata, including for
 high-confidence results. Use **Fetch Release** afterwards to choose and confirm
 the exact Discogs pressing, as a fingerprint identifies a recording rather than a
@@ -489,4 +499,17 @@ Team Badger shirts and other goodies are available at [shunte88](https://www.zaz
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+VRipr's own source is **MIT** — see [LICENSE](LICENSE).
+
+Released binaries are statically linked and embed third-party code under
+additional terms, most notably:
+
+| Component | Licence | Obligation |
+|---|---|---|
+| [`chromaprint-next`](https://github.com/attilagyorffy/chromaprint-next) (AcoustID fingerprinting) | `MIT AND LGPL-2.1-or-later` | Its FFmpeg-derived resampler is LGPL; binaries ship [LICENSE-LGPL-2.1](LICENSE-LGPL-2.1) and you may modify and relink it |
+| [Symphonia](https://github.com/pdeljanov/Symphonia) (audio decoding) | `MPL-2.0` | Per-file copyleft; used unmodified, source public |
+
+Both are used **unmodified**, and VRipr's complete source is public, so you can
+rebuild with a patched dependency at any time. Full details, including the
+LGPL-2.1 section 6 relinking notice, are in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

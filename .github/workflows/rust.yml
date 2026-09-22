@@ -22,6 +22,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: vripr
             asset_name: vripr-linux-x86_64
+            archive: tar.gz
             cargo_flags: --features onnx
 
           # macOS Apple Silicon (M1/M2 — native on macos-latest)
@@ -29,6 +30,7 @@ jobs:
             target: aarch64-apple-darwin
             artifact: vripr
             asset_name: vripr-macos-arm64
+            archive: tar.gz
             cargo_flags: --features onnx
 
           # macOS Intel — no ORT prebuilt binaries for x86_64-apple-darwin;
@@ -37,13 +39,15 @@ jobs:
             target: x86_64-apple-darwin
             artifact: vripr
             asset_name: vripr-macos-x86_64
+            archive: tar.gz
             cargo_flags: ""
 
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: vripr.exe
-            asset_name: vripr-windows-x86_64.exe
+            asset_name: vripr-windows-x86_64
+            archive: zip
             cargo_flags: --features onnx
 
     runs-on: ${{ matrix.os }}
@@ -81,11 +85,31 @@ jobs:
       - name: Test
         run: cargo test --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
+      # Binaries are statically linked and embed LGPL-2.1 (chromaprint-next's
+      # FFmpeg-derived resampler) and MPL-2.0 (Symphonia) code, so the licence
+      # texts and third-party notices travel inside the same archive as the
+      # executable rather than being published as separate downloads.
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="staging/${{ matrix.asset_name }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "$staging/"
+          cp LICENSE LICENSE-LGPL-2.1 THIRD-PARTY-NOTICES.md README.md "$staging/"
+          mkdir -p dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            ( cd staging && 7z a -tzip "../dist/${{ matrix.asset_name }}.zip" "${{ matrix.asset_name }}" )
+          else
+            tar -czf "dist/${{ matrix.asset_name }}.tar.gz" -C staging "${{ matrix.asset_name }}"
+          fi
+          ls -lh dist/
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          path: dist/${{ matrix.asset_name }}.${{ matrix.archive }}
           if-no-files-found: error
 
   # Create a GitHub Release and attach all platform binaries when a version tag is pushed.
@@ -103,15 +127,12 @@ jobs:
         with:
           path: artifacts
 
-      # Flatten the per-artifact subdirectories so binaries are attached directly.
+      # Flatten the per-artifact subdirectories so the archives attach directly.
       - name: Prepare release assets
         run: |
+          set -euo pipefail
           mkdir release
-          for dir in artifacts/*/; do
-            name=$(basename "$dir")
-            file=$(ls "$dir")
-            cp "$dir/$file" "release/$name"
-          done
+          find artifacts -type f -exec cp {} release/ \;
           ls -lh release/
 
       - name: Create GitHub Release

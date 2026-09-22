@@ -162,11 +162,6 @@ fn show_api_keys_section(ui: &mut Ui, config: &mut Config) {
                     .hint_text("AcoustID application key"),
             );
             ui.end_row();
-            ui.label("fpcalc Path:")
-                .on_hover_text("Leave empty to find fpcalc (Chromaprint) on PATH.");
-            ui.add(egui::TextEdit::singleline(&mut config.fpcalc_path)
-                .desired_width(290.0).hint_text("fpcalc (PATH)"));
-            ui.end_row();
             ui.label("MusicBrainz User-Agent:");
             ui.add(egui::TextEdit::singleline(&mut config.musicbrainz_user_agent)
                 .desired_width(290.0));

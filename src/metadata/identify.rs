@@ -1,8 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
-use hound::{SampleFormat, WavSpec, WavWriter};
+use chromaprint::{Algorithm, Fingerprinter};
 use serde::Deserialize;
 use std::path::Path;
-use std::process::Command;
 
 const ACOUSTID_URL: &str = "https://api.acoustid.org/v2/lookup";
 const MUSICBRAINZ_URL: &str = "https://musicbrainz.org/ws/2/recording";
@@ -22,12 +21,6 @@ pub struct IdentificationCandidate {
     pub fingerprint_score: f32,
     pub duration_score: f32,
     pub score: f32,
-}
-
-#[derive(Deserialize)]
-struct FpcalcOutput {
-    duration: f64,
-    fingerprint: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -81,54 +74,20 @@ struct MusicBrainzRelease {
     title: String,
 }
 
-/// Run fpcalc for a bounded segment. Its JSON output is parsed without ever
-/// logging the fingerprint, which is an identifier derived from the audio.
+/// Fingerprint a bounded segment of `audio_path` with the in-process
+/// Chromaprint implementation. The fingerprint is an identifier derived from
+/// the audio and is never logged.
 ///
-/// fpcalc has no `-offset` option — it can only fingerprint from the start of
-/// a file (optionally truncated with `-length`). To fingerprint an arbitrary
-/// segment of the analysis audio (e.g. an individual track within a whole
-/// side/album recording), the segment is decoded and written to a temporary
-/// WAV file first, then fpcalc is run on that file with no offset needed.
+/// The `[start_secs, start_secs + length_secs)` window is decoded and streamed
+/// straight into the fingerprinter, so no intermediate file is written and no
+/// external `fpcalc` binary is needed. The returned duration is the length of
+/// audio that was actually fingerprinted, which is what AcoustID expects
+/// alongside the fingerprint.
 pub fn fingerprint_segment(
-    fpcalc_path: &str,
     audio_path: &Path,
     start_secs: f64,
     length_secs: f64,
 ) -> Result<Fingerprint> {
-    let executable = if fpcalc_path.trim().is_empty() { "fpcalc" } else { fpcalc_path };
-    let length = length_secs.clamp(1.0, 120.0);
-    let segment_file = extract_segment_wav(audio_path, start_secs.max(0.0), length)
-        .context("Could not extract the track segment from the analysis audio")?;
-    let output = Command::new(executable)
-        .args(["-json"])
-        .arg(segment_file.path())
-        .output()
-        .with_context(|| format!(
-            "Could not run fpcalc ({executable}). Install Chromaprint/fpcalc or set its path in Settings"
-        ))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
-        if detail.is_empty() {
-            bail!(
-                "fpcalc failed. Check that it can read the analysis audio and that its configured path is correct"
-            );
-        }
-        bail!(
-            "fpcalc failed: {detail}. Check that it can read the analysis audio and that its configured path is correct"
-        );
-    }
-    parse_fpcalc_output(&output.stdout)
-}
-
-/// Decode `audio_path` and write the `[start_secs, start_secs + length_secs)`
-/// window to a temporary mono 16-bit PCM WAV file, returning the handle that
-/// deletes the file on drop.
-fn extract_segment_wav(
-    audio_path: &Path,
-    start_secs: f64,
-    length_secs: f64,
-) -> Result<tempfile::NamedTempFile> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
     use symphonia::core::errors::Error as SErr;
@@ -136,6 +95,9 @@ fn extract_segment_wav(
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
+
+    let length_secs = length_secs.clamp(1.0, 120.0);
+    let start_secs = start_secs.max(0.0);
 
     let src = std::fs::File::open(audio_path)
         .with_context(|| format!("Cannot open analysis audio {:?}", audio_path))?;
@@ -165,7 +127,7 @@ fn extract_segment_wav(
     let seek_result = format.seek(
         symphonia::core::formats::SeekMode::Accurate,
         symphonia::core::formats::SeekTo::Time {
-            time: symphonia::core::units::Time::from(start_secs.max(0.0)),
+            time: symphonia::core::units::Time::from(start_secs),
             track_id: Some(track_id),
         },
     );
@@ -184,71 +146,69 @@ fn extract_segment_wav(
     let mut frame_index: u64 = seek_result.map(|seeked| seeked.actual_ts).unwrap_or(0);
     let start_frame = requested_start_frame.max(frame_index).min(end_frame);
 
-    let mut tmp = tempfile::Builder::new()
-        .prefix("vripr_fp_")
-        .suffix(".wav")
-        .tempfile()
-        .context("Could not create a temporary file for the track segment")?;
-    let mut wrote_any = false;
-    {
-        let spec = WavSpec {
-            channels: n_channels as u16,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
+    let mut fingerprinter = Fingerprinter::new(Algorithm::default());
+    fingerprinter.start(sample_rate, n_channels as u16)
+        .map_err(|e| anyhow!("Could not start the fingerprinter: {e}"))?;
+
+    // Interleaved i16 frames handed to Chromaprint one decoded packet at a time.
+    let mut pcm: Vec<i16> = Vec::new();
+    let mut frames_fed: u64 = 0;
+
+    'decode: loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SErr::IoError(_)) => break,
+            Err(SErr::ResetRequired) => { decoder.reset(); continue; }
+            Err(e) => return Err(e.into()),
         };
-        let mut writer = WavWriter::new(&mut tmp, spec)
-            .context("Could not write the track segment WAV header")?;
-
-        'decode: loop {
-            let packet = match format.next_packet() {
-                Ok(p) => p,
-                Err(SErr::IoError(_)) => break,
-                Err(SErr::ResetRequired) => { decoder.reset(); continue; }
-                Err(e) => return Err(e.into()),
-            };
-            if packet.track_id() != track_id { continue; }
-            let decoded = match decoder.decode(&packet) {
-                Ok(d) => d,
-                Err(SErr::DecodeError(_)) => continue,
-                Err(e) => return Err(e.into()),
-            };
-            let spec = *decoded.spec();
-            if sample_buf.is_none() {
-                sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
-            }
-            let buf = sample_buf.as_mut().unwrap();
-            buf.copy_interleaved_ref(decoded);
-            for frame in buf.samples().chunks(n_channels) {
-                if frame_index >= end_frame { break 'decode; }
-                if frame_index >= start_frame {
-                    for &s in frame {
-                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                        writer.write_sample(v)?;
-                    }
-                    wrote_any = true;
-                }
-                frame_index += 1;
-            }
+        if packet.track_id() != track_id { continue; }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(SErr::DecodeError(_)) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let spec = *decoded.spec();
+        if sample_buf.is_none() {
+            sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
         }
-
-        writer.finalize().context("Could not finalise the track segment WAV")?;
+        let buf = sample_buf.as_mut().unwrap();
+        buf.copy_interleaved_ref(decoded);
+        pcm.clear();
+        let mut reached_end = false;
+        for frame in buf.samples().chunks(n_channels) {
+            if frame_index >= end_frame { reached_end = true; break; }
+            if frame_index >= start_frame {
+                for &s in frame {
+                    pcm.push((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                }
+                frames_fed += 1;
+            }
+            frame_index += 1;
+        }
+        if !pcm.is_empty() {
+            fingerprinter.feed(&pcm)
+                .map_err(|e| anyhow!("Could not fingerprint the track segment: {e}"))?;
+        }
+        if reached_end { break 'decode; }
     }
 
-    if !wrote_any {
+    if frames_fed == 0 {
         bail!("the analysis audio has no samples at this track's position");
     }
 
-    Ok(tmp)
+    fingerprinter.finish()
+        .map_err(|e| anyhow!("Could not finalise the track fingerprint: {e}"))?;
+
+    let duration = frames_fed as f64 / sample_rate as f64;
+    build_fingerprint(fingerprinter.encode(), duration)
 }
 
-pub fn parse_fpcalc_output(output: &[u8]) -> Result<Fingerprint> {
-    let fingerprint: FpcalcOutput = serde_json::from_slice(output)
-        .context("fpcalc returned unreadable JSON")?;
-    if fingerprint.fingerprint.is_empty() || fingerprint.duration <= 0.0 {
-        bail!("fpcalc did not return a usable fingerprint");
+/// Validate a freshly computed fingerprint before it is sent to AcoustID.
+pub fn build_fingerprint(fingerprint: String, duration: f64) -> Result<Fingerprint> {
+    if fingerprint.is_empty() || duration <= 0.0 {
+        bail!("the track segment did not produce a usable fingerprint — it may be too short or silent");
     }
-    Ok(Fingerprint { duration: fingerprint.duration, fingerprint: fingerprint.fingerprint })
+    Ok(Fingerprint { duration, fingerprint })
 }
 
 pub fn extract_api_error(body: &str) -> Option<String> {
